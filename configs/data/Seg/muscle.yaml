@@ -1,0 +1,15 @@
+name: "muscle"
+type: "SegBase"
+num_classes: 2
+img_size: 512
+path:
+  root: "/home/vitaleioucru/datasets/Seg/muscle_subj"
+  split:
+    train: "training_set"
+    val: "val_set"
+    test: "test_set"
+    vis:
+      samples: 16
+      interval: 10
+
+transform:

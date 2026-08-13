@@ -27,7 +27,7 @@ class BaseTrainer:
             loggers=TensorBoardLogger(config.output, "logs"),
         )
         self.fabric.launch()
-        self.fabric.seed_everything(42)
+        self.fabric.seed_everything(config.seed)
         # make dir and logger
         os.makedirs(config.output, exist_ok=True)
         self.logger = create_logger(
@@ -37,11 +37,8 @@ class BaseTrainer:
         )
 
         self.writer = self.fabric.loggers[0].experiment
-        try:
-            # for torch version >=2.4
-            self.scaler = torch.amp.GradScaler("cuda")
-        except:
-            self.scaler = torch.cuda.amp.GradScaler()
+        # (upgrade) GradScaler thu cong da xoa: khong duoc dung o dau,
+        # Fabric voi precision mixed tu quan ly scaler noi bo.
 
         self.epoch = 0
 
@@ -52,15 +49,34 @@ class BaseTrainer:
 
         # model fabric setting up
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
+
+        # torch.compile (bat bang train.compile=true).
+        # LUU Y: step() goi model.module.backbone(...) truc tiep, KHONG qua
+        # model.forward, nen compile ca wrapper se vo tac dung — phai compile
+        # dung module duoc goi. Dung nn.Module.compile() in-place de giu
+        # nguyen ten key state_dict (khong sinh prefix _orig_mod.),
+        # checkpoint tuong thich giua run co/khong compile.
+        if getattr(self.config.train, "compile", False):
+            target = getattr(self.model, "module", self.model)
+            if hasattr(target, "backbone"):
+                target.backbone.compile()
+                self.logger.info("torch.compile: da compile backbone (in-place)")
+            else:
+                target.compile()
+                self.logger.info("torch.compile: da compile toan model (in-place)")
+
         self.fabric.loggers[0].log_hyperparams(self.config)
 
         self.state = {
             "model": self.model,
             "optimizer": self.optimizer,
-            "lr_scheduler": self.lr_scheduler.state_dict(),
-            "scaler": self.scaler,
+            # FIX resume: truyen OBJECT (Fabric goi state_dict/load_state_dict
+            # dung thoi diem save/load). Ban cu luu snapshot dict tai __init__
+            # nen moi checkpoint deu chua trang thai scheduler ban dau.
+            "lr_scheduler": self.lr_scheduler,
             "epoch": self.epoch,
-            "config": self.config,
+            # plain dict de load duoc voi torch>=2.6 (weights_only=True default)
+            "config": OmegaConf.to_container(self.config, resolve=True),
         }
 
     def fit(self):
@@ -184,7 +200,7 @@ class BaseTrainer:
             not_autoload = self.fabric.load(self.config.model.resume)
             self.model.load_state_dict(not_autoload["model"])
             self.epoch = not_autoload["epoch"]
-            self.config.train.epoch = self.epoch + self.config.train.epochs
+            self.config.train.epochs = self.epoch + self.config.train.epochs
             self.logger.info(
                 f"Only resume model from from {self.config.model.resume} at epoch {self.epoch}; The start epoch is {self.epoch} and the total epoch has updated to {self.config.train.epochs}"
             )

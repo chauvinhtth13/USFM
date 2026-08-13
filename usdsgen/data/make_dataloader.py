@@ -17,31 +17,31 @@ def build_loader(config, logger):
     )
 
     # dataloader will be setup by fabric, so no distribution sample here
-    dataloader_train = DataLoader(
-        dataset_train,
-        # sampler=sampler_train,
-        batch_size=config.data.batch_size,
+    common = dict(
         num_workers=config.data.num_workers,
         pin_memory=config.data.pin_memory,
+        persistent_workers=config.data.num_workers > 0,
+    )
+    dataloader_train = DataLoader(
+        dataset_train,
+        batch_size=config.data.batch_size,
+        shuffle=True,  # FIX (audit): ban cu KHONG shuffle train
         drop_last=True,
+        **common,
     )
 
     dataloader_val = DataLoader(
         dataset_val,
-        # sampler=sampler_val,
         batch_size=config.data.batch_size,
-        num_workers=config.data.num_workers,
-        pin_memory=config.data.pin_memory,
         drop_last=False,
+        **common,
     )
 
     dataloader_test = DataLoader(
         dataset_test,
-        # sampler=sampler_test,
         batch_size=config.data.batch_size,
-        num_workers=config.data.num_workers,
-        pin_memory=config.data.pin_memory,
         drop_last=False,
+        **common,
     )
 
     return dataloader_train, dataloader_val, dataloader_test

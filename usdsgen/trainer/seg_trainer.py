@@ -72,14 +72,15 @@ class SegTrainer(BaseTrainer):
         super().__init__(config)
         self.max_dice = 0.0
         # task specific setting
+        from omegaconf import OmegaConf as _OC
+
         self.state = {
             "model": self.model,
             "optimizer": self.optimizer,
-            "lr_scheduler": self.lr_scheduler.state_dict(),
+            "lr_scheduler": self.lr_scheduler,  # object, xem ghi chu basetrainer
             "max_dice": self.max_dice,
-            "scaler": self.scaler,
             "epoch": self.epoch,
-            "config": self.config,
+            "config": _OC.to_container(self.config, resolve=True),
         }
         self.top_k_results_manager = Top_K_results_manager(mode="max", max_len=5)
         self.Dice = GeneralizedDiceScore(
@@ -184,7 +185,6 @@ class SegTrainer(BaseTrainer):
             self.lr_scheduler.step_update(self.epoch * num_steps + idx)
             norm_meter.update(grad_norm)
             loss_meter.update(loss.item(), labels.size(0))
-            norm_meter.update(grad_norm)
             outputs = outputs.argmax(dim=1)
             dice_meter.update(self.Dice(outputs, labels).item())
             iou_meter.update(self.IOU(outputs, labels).item())
@@ -255,7 +255,8 @@ class SegTrainer(BaseTrainer):
             "segmetrics": segmetrics,
         }
 
-        return dice, iou, loss, val_result
+        # FIX (audit): tra ve loss trung binh, khong phai batch cuoi
+        return dice, iou, loss_meter.avg, val_result
 
     @torch.no_grad()
     def test(self):
@@ -263,7 +264,6 @@ class SegTrainer(BaseTrainer):
             self.load_resume()
         else:
             raise ValueError("No checkpoint loaded for testing")
-        self.load_resume()
         self.logger.info("Start testing")
         dice, iou, loss, test_result = self.validate(self.dataloader_test)
         self.logger.info(f"Test Dice: {dice:.3f}, Test IoU: {iou:.3f}")

@@ -8,7 +8,7 @@ L:
   strategy: auto
   devices: 1
   num_nodes: 1
-  precision: 16-mixed
+  precision: bf16-mixed 
   use_distributed_sampler: false
 
 data:

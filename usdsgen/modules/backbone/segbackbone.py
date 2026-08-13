@@ -6,9 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
-from mmseg.models.builder import BACKBONES
 from scipy import interpolate
-from timm.models.layers import drop_path, to_2tuple, trunc_normal_
+from timm.layers import drop_path, to_2tuple, trunc_normal_
 
 
 class DropPath(nn.Module):
@@ -94,7 +93,7 @@ class Attention(nn.Module):
             # get pair-wise relative position index for each token inside the window
             coords_h = torch.arange(window_size[0])
             coords_w = torch.arange(window_size[1])
-            coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
+            coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))  # 2, Wh, Ww
             coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
             relative_coords = (
                 coords_flatten[:, :, None] - coords_flatten[:, None, :]
@@ -319,7 +318,7 @@ class RelativePositionBias(nn.Module):
         # get pair-wise relative position index for each token inside the window
         coords_h = torch.arange(window_size[0])
         coords_w = torch.arange(window_size[1])
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))  # 2, Wh, Ww
         coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
         relative_coords = (
             coords_flatten[:, :, None] - coords_flatten[:, None, :]
@@ -353,7 +352,6 @@ class RelativePositionBias(nn.Module):
         return relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
 
 
-@BACKBONES.register_module()
 class HVITBackbone4Seg(nn.Module):
     """Vision Transformer with support for patch or hybrid CNN input stage."""
 

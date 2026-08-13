@@ -1,5 +1,20 @@
+# --- Workaround: Hydra 1.3.x vỡ với argparse của Python 3.14 ---
+# Python 3.14 thêm _check_help() validate help-string khi add_argument;
+# Hydra truyền object LazyCompletionHelp (class cục bộ trong
+# get_args_parser, không monkeypatch trực tiếp được) không hỗ trợ
+# toán tử `in` -> "ValueError: badly formed help string".
+# Vô hiệu hóa bước validate này: nó chỉ kiểm tra format chuỗi help,
+# không ảnh hưởng chức năng. Xóa được khi hydra-core > 1.3.5 vá.
+import argparse
+
+argparse._ActionsContainer._check_help = lambda self, action: None
+# ----------------------------------------------------------------
+
 import hydra
 from omegaconf import DictConfig
+
+import torch
+torch.set_float32_matmul_precision("high") 
 
 
 @hydra.main(

@@ -2,10 +2,7 @@
 model:
   model_name: SegVit
   model_type: FM
-  norm_cfg: &norm_cfg
-    type: LN
-    eps: 1e-6
-    requires_grad: true
+  # (upgrade) norm_cfg da xoa: chi mmseg registry dung, khong con can.
 
   model_cfg:
     type: EncoderDecoder
@@ -28,6 +25,11 @@ model:
       # add by upernet
       use_abs_pos_emb: false
       use_rel_pos_bias: true
+      # (audit #3) KIEM TRA checkpoint truoc khi bat 2 dong duoi:
+      # neu checkpoint chua blocks.*.attn.q_bias / gamma_1 thi PHAI bat,
+      # khong thi cac trong so do bi bo qua trong im lang.
+      qkv_bias: true
+      init_values: 0.1
     decode_head:
       type: ATMHead
       img_size: ${data.img_size}

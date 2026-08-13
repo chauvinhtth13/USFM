@@ -2,16 +2,14 @@ import math
 from functools import partial
 from typing import Optional
 
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmseg.models.builder import HEADS
-from mmseg.models.decode_heads.decode_head import BaseDecodeHead
-from mmseg.models.losses import accuracy
-from timm.models.layers import trunc_normal_
+from timm.layers import trunc_normal_
 from torch import Tensor
 from torch.nn import TransformerDecoder, TransformerDecoderLayer
+
+from usdsgen.modules.losses.atm_loss import ATMLoss
 
 
 def trunc_normal_init(
@@ -170,12 +168,24 @@ class MLP(nn.Module):
         return x
 
 
-@HEADS.register_module()
-class ATMHead(BaseDecodeHead):
+class ATMHead(nn.Module):
+    """ATM decode head — de-mm version.
+
+    Truoc day ke thua mmseg BaseDecodeHead; nay ke thua nn.Module va tu quan
+    dung 4 thuoc tinh tung lay tu lop cha: in_channels, num_classes,
+    ignore_index, loss_decode. `channels` giu trong signature chi de tuong
+    thich config cu (BaseDecodeHead can, ATMHead khong dung).
+    """
+
     def __init__(
         self,
         img_size,
         in_channels,
+        num_classes,
+        loss_decode,
+        channels=None,  # unused; giu tuong thich config
+        ignore_index=255,
+        align_corners=False,
         embed_dims=768,
         num_layers=3,
         num_heads=8,
@@ -186,7 +196,18 @@ class ATMHead(BaseDecodeHead):
         shrink_ratio=None,
         **kwargs,
     ):
-        super().__init__(in_channels=in_channels, **kwargs)
+        super().__init__()
+        self.in_channels = in_channels
+        self.num_classes = num_classes
+        self.ignore_index = ignore_index
+        self.align_corners = align_corners
+        # BaseDecodeHead truoc day build loss tu cfg qua registry LOSSES;
+        # nay build truc tiep. `loss_decode` la dict (da resolve tu OmegaConf).
+        if isinstance(loss_decode, dict):
+            loss_cfg = {k: v for k, v in loss_decode.items() if k != "type"}
+            self.loss_decode = ATMLoss(**loss_cfg)
+        else:
+            self.loss_decode = loss_decode  # cho phep truyen module co san
 
         self.image_size = img_size
         self.use_stages = use_stages
@@ -227,7 +248,8 @@ class ATMHead(BaseDecodeHead):
 
         self.class_embed = nn.Linear(dim, self.num_classes + 1)
         self.CE_loss = CE_loss
-        delattr(self, "conv_seg")
+        # (de-mm) conv_seg khong con: BaseDecodeHead tao no, ATMHead xoa no;
+        # nay khong ke thua nen khong can delattr.
 
     def init_weights(self):
         for n, m in self.named_modules():
@@ -354,7 +376,15 @@ class ATMHead(BaseDecodeHead):
     def losses(self, seg_logit, seg_label):
         """Compute segmentation loss."""
         if self.CE_loss:
-            return super().losses(seg_logit["pred"], seg_label)
+            # Truoc day uy quyen cho mmseg BaseDecodeHead.losses (CE).
+            # Config mac dinh CE_loss=False nen nhanh nay khong dung;
+            # neu can CE, dung truc tiep F.cross_entropy duoi day.
+            seg_label_ = seg_label.squeeze(1).long()
+            return {
+                "loss_ce": F.cross_entropy(
+                    seg_logit["pred"], seg_label_, ignore_index=self.ignore_index
+                )
+            }
 
         if isinstance(seg_logit, dict):
             # atm loss

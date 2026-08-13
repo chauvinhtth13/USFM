@@ -21,6 +21,7 @@ train:
   min_lr: 0
   clip_grad: 5.0
   auto_resume: true
+  compile: false
   accumulation_steps: 0
   use_checkpoint: false
   layer_decay: 1.0

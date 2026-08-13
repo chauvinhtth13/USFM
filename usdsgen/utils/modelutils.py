@@ -80,8 +80,13 @@ def reduce_tensor(tensor):
 
 def load_pretrained(model_cfg, model, logger):
     logger.info(f">>>>>>>>>> Fine-tuned from {model_cfg.pretrained} ..........")
-    checkpoint = torch.load(model_cfg.pretrained, map_location="cpu")
-    checkpoint_model = checkpoint
+    # torch >= 2.6: weights_only=True la default; khai tuong minh cho ro rang.
+    checkpoint = torch.load(
+        model_cfg.pretrained, map_location="cpu", weights_only=True
+    )
+    checkpoint_model = checkpoint.get("model", checkpoint) if isinstance(
+        checkpoint, dict
+    ) else checkpoint
 
     if "swin" in model_cfg.type.lower():
         logger.info(">>>>>>>>>> Remapping pre-trained keys for SWIN ..........")
@@ -93,7 +98,20 @@ def load_pretrained(model_cfg, model, logger):
         raise NotImplementedError
 
     msg = model.load_state_dict(checkpoint_model, strict=False)
-    logger.info(msg)
+    missing = [k for k in msg.missing_keys if "relative_position_index" not in k]
+    unexpected = list(msg.unexpected_keys)
+    n_model = len(model.state_dict())
+    n_loaded = n_model - len(missing)
+    logger.info(f"Missing keys ({len(missing)}): {missing}")
+    logger.info(f"Unexpected keys ({len(unexpected)}): {unexpected}")
+    logger.info(f"Loaded {n_loaded}/{n_model} tensors from pretrained")
+    if len(missing) > 10 or len(unexpected) > 10:
+        raise RuntimeError(
+            f"Pretrained load looks broken: {len(missing)} missing, "
+            f"{len(unexpected)} unexpected keys. "
+            "Kiem tra qkv_bias / init_values trong model config co khop "
+            "kien truc checkpoint khong."
+        )
 
     del checkpoint_model
     torch.cuda.empty_cache()

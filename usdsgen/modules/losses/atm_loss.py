@@ -2,11 +2,9 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from mmseg.models.builder import LOSSES
 
 
 # from .criterion_point import SetCriterion_point
-@LOSSES.register_module()
 class ATMLoss(nn.Module):
     """ATMLoss."""
 

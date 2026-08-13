@@ -2,7 +2,7 @@ import os
 
 import numpy as np
 import torch
-from hausdorff import hausdorff_distance
+from monai.metrics import compute_hausdorff_distance
 from PIL import Image
 
 
@@ -177,9 +177,8 @@ def get_seg_metrics(GT_folder, Pre_folder):
 
 def get_seg_fromarray(GT_array, Pre_array):
     device = GT_array.device
-    GT_array = GT_array * 255
-    Pre_array = Pre_array * 255
-
+    # (upgrade) bo *255: dice/iou binarize >=1 nen khong doi ket qua,
+    # con hausdorff nay tinh bang monai tren nhan goc.
     B, H, W = GT_array.shape
     dice_scores = torch.zeros(B).to(device)
     hd95_scores = torch.zeros(B).to(device)
@@ -192,13 +191,18 @@ def get_seg_fromarray(GT_array, Pre_array):
         gt = GT_array[i : i + 1, :, :]
 
         dice_scores[i] = dice_coefficient(pred, gt)
-        hd95_scores[i] = torch.tensor(
-            hausdorff_distance(
-                pred[0, :, :].cpu().numpy(),
-                gt[0, :, :].cpu().numpy(),
-                distance="manhattan",
-            )
-        ).to(device)
+        # (upgrade) HD95 bang monai thay package `hausdorff` (khong bao tri,
+        # khong co wheel py3.14). LUU Y: so se KHAC baseline cu (HD95 vs HD tho,
+        # euclid vs manhattan) — thay doi co chu y, chuan hon trong y van.
+        pred_1 = (pred[0] >= 1).float()
+        gt_1 = (gt[0] >= 1).float()
+        if pred_1.any() and gt_1.any():
+            hd95_scores[i] = compute_hausdorff_distance(
+                pred_1[None, None], gt_1[None, None], percentile=95
+            ).squeeze().to(device)
+        else:
+            # mot trong hai mask rong: HD khong xac dinh, quy uoc duong cheo anh
+            hd95_scores[i] = torch.tensor((H**2 + W**2) ** 0.5, device=device)
         iou, acc, se, sp = sespiou_coefficient2(pred, gt, all=False)
         iou_scores[i] = iou
         accuracy_scores[i] = acc
