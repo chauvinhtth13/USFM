@@ -1,13 +1,11 @@
 import math
 from functools import partial
 
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as checkpoint
-from scipy import interpolate
 from timm.layers import drop_path, to_2tuple, trunc_normal_
+from torch import nn
+from torch.utils import checkpoint
 
 
 class DropPath(nn.Module):
@@ -93,7 +91,9 @@ class Attention(nn.Module):
             # get pair-wise relative position index for each token inside the window
             coords_h = torch.arange(window_size[0])
             coords_w = torch.arange(window_size[1])
-            coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))  # 2, Wh, Ww
+            coords = torch.stack(
+                torch.meshgrid([coords_h, coords_w], indexing="ij")
+            )  # 2, Wh, Ww
             coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
             relative_coords = (
                 coords_flatten[:, :, None] - coords_flatten[:, None, :]
@@ -145,9 +145,10 @@ class Attention(nn.Module):
             qkv[2],
         )  # make torchscript happy (cannot use tensor as tuple)
 
-        q = q * self.scale
-        attn = q @ k.transpose(-2, -1)
-
+        # Gop moi bias vi tri thanh mot attn_mask cong them. O 512px co 1025
+        # token, ma tran attn 12x1025x1025 chiem phan lon VRAM neu hien thuc
+        # hoa; SDPA (flash/mem-efficient) khong hien thuc hoa no.
+        attn_bias = None
         if self.relative_position_bias_table is not None:
             relative_position_bias = self.relative_position_bias_table[
                 self.relative_position_index.view(-1)
@@ -156,18 +157,26 @@ class Attention(nn.Module):
                 self.window_size[0] * self.window_size[1] + 1,
                 -1,
             )  # Wh*Ww,Wh*Ww,nH
-            relative_position_bias = relative_position_bias.permute(
-                2, 0, 1
-            ).contiguous()  # nH, Wh*Ww, Wh*Ww
-            attn = attn + relative_position_bias.unsqueeze(0)
+            attn_bias = (
+                relative_position_bias.permute(2, 0, 1).contiguous().unsqueeze(0)
+            )  # 1, nH, Wh*Ww, Wh*Ww
 
         if rel_pos_bias is not None:
-            attn = attn + rel_pos_bias
+            attn_bias = rel_pos_bias if attn_bias is None else attn_bias + rel_pos_bias
 
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
+        if attn_bias is not None:
+            attn_bias = attn_bias.to(q.dtype)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, -1)
+        x = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_bias,
+            dropout_p=self.attn_drop.p if self.training else 0.0,
+            scale=self.scale,  # giu nguyen qk_scale cu, khong dung mac dinh cua SDPA
+        )
+
+        x = x.transpose(1, 2).reshape(B, N, -1)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -214,12 +223,8 @@ class Block(nn.Module):
         )
 
         if init_values is not None:
-            self.gamma_1 = nn.Parameter(
-                init_values * torch.ones(dim), requires_grad=True
-            )
-            self.gamma_2 = nn.Parameter(
-                init_values * torch.ones(dim), requires_grad=True
-            )
+            self.gamma_1 = nn.Parameter(init_values * torch.ones(dim), requires_grad=True)
+            self.gamma_2 = nn.Parameter(init_values * torch.ones(dim), requires_grad=True)
         else:
             self.gamma_1, self.gamma_2 = None, None
 
@@ -284,9 +289,7 @@ class HybridEmbed(nn.Module):
                 training = backbone.training
                 if training:
                     backbone.eval()
-                o = self.backbone(torch.zeros(1, in_chans, img_size[0], img_size[1]))[
-                    -1
-                ]
+                o = self.backbone(torch.zeros(1, in_chans, img_size[0], img_size[1]))[-1]
                 feature_size = o.shape[-2:]
                 feature_dim = o.shape[1]
                 backbone.train(training)
@@ -318,14 +321,14 @@ class RelativePositionBias(nn.Module):
         # get pair-wise relative position index for each token inside the window
         coords_h = torch.arange(window_size[0])
         coords_w = torch.arange(window_size[1])
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))  # 2, Wh, Ww
+        coords = torch.stack(
+            torch.meshgrid([coords_h, coords_w], indexing="ij")
+        )  # 2, Wh, Ww
         coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
         relative_coords = (
             coords_flatten[:, :, None] - coords_flatten[:, None, :]
         )  # 2, Wh*Ww, Wh*Ww
-        relative_coords = relative_coords.permute(
-            1, 2, 0
-        ).contiguous()  # Wh*Ww, Wh*Ww, 2
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
         relative_coords[:, :, 0] += window_size[0] - 1  # shift to start from 0
         relative_coords[:, :, 1] += window_size[1] - 1
         relative_coords[:, :, 0] *= 2 * window_size[1] - 1
@@ -555,7 +558,9 @@ class HVITBackbone4Seg(nn.Module):
         features = []
         for i, blk in enumerate(self.blocks):
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x, rel_pos_bias)
+                # use_reentrant=False: ban reentrant cu khong tuong thich voi
+                # input khong yeu cau grad (rel_pos_bias=None) va se bi go bo.
+                x = checkpoint.checkpoint(blk, x, rel_pos_bias, use_reentrant=False)
             else:
                 x = blk(x, rel_pos_bias)
             if i in self.out_indices:

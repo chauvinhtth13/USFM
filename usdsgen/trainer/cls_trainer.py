@@ -5,12 +5,17 @@ import time
 
 import numpy as np
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix
 from timm.utils import AverageMeter
 
+from usdsgen.utils.file_manager import EXPORT_DIRNAME
 from usdsgen.utils.logger import array_to_markdown
-from usdsgen.utils.modelutils import get_grad_norm
+from usdsgen.utils.modelutils import (
+    get_grad_norm,
+    save_deploy_checkpoint,
+    save_pretrain_checkpoint,
+)
 
 from .basetrainer import BaseTrainer
 
@@ -23,17 +28,28 @@ class ClsTrainer(BaseTrainer):
         self.state = {
             "model": self.model,
             "optimizer": self.optimizer,
-            "lr_scheduler": self.lr_scheduler.state_dict(),
+            # object, khong phai snapshot — xem ghi chu basetrainer
+            "lr_scheduler": self.lr_scheduler,
             "max_accuracy": self.max_accuracy,
-            "scaler": self.scaler,
+            # scaler da xoa khoi BaseTrainer: Fabric tu quan ly noi bo
             "epoch": self.epoch,
-            "config": self.config,
+            # plain dict de load duoc voi torch>=2.6 (weights_only=True default)
+            "config": OmegaConf.to_container(self.config, resolve=True),
         }
 
+        # Kien truc de nhung vao deploy/pretrain checkpoint; bo `pretrained`
+        # vi do la duong dan tuyet doi tren may train.
+        self.deploy_model_cfg = OmegaConf.to_container(
+            self.config.model.model_cfg, resolve=True
+        )
+        self.deploy_model_cfg.pop("pretrained", None)
+        if isinstance(self.deploy_model_cfg.get("backbone"), dict):
+            self.deploy_model_cfg["backbone"].pop("pretrained", None)
+
         # Verify if the num of classes in training datafolder is same to the config
-        assert (
-            len(self.dataloader_val.dataset.classes) == self.config.data.num_classes
-        ), "The num of classes in training datafolder is not same to the config."
+        assert len(self.dataloader_val.dataset.classes) == self.config.data.num_classes, (
+            "The num of classes in training datafolder is not same to the config."
+        )
         self.logger.info(f"num of classes: {len(self.dataloader_val.dataset.classes)}")
         self.logger.info(f"class_to_index: {self.dataloader_val.dataset.class_to_idx}")
         # cm row name setting
@@ -49,8 +65,10 @@ class ClsTrainer(BaseTrainer):
         start_time = time.time()
 
         start_epoch = max(self.config.train.start_epoch, self.epoch)
+        loginfo = None  # co the chua validate lan nao khi toi epoch cuoi
         for epoch in range(start_epoch, self.config.train.epochs):
             self.epoch = epoch
+            isbest = False
             train_acc, _, train_loss = self.train_one_epoch(self.dataloader_train)
             tensorboard_log = {
                 "loss": {
@@ -70,23 +88,19 @@ class ClsTrainer(BaseTrainer):
                     self.max_accuracy = val_acc
                     isbest = True
                     self.logger.info(f"Max accuracy: {self.max_accuracy:.3f}")
-                    self.logger.info(
-                        f"Accuracy of the network on the test images: {self.max_accuracy:.3f}"
-                    )
-                    self.save_checkpoint(epoch, self.max_accuracy, loginfo, isbest)
-            else:
-                pass
 
-            if epoch == self.config.train.epochs - 1:
-                self.save_checkpoint(epoch, self.max_accuracy, loginfo, isbest)
-
-            total_time = time.time() - start_time
-            total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-            self.logger.info("Training time {}".format(total_time_str))
+            is_last = epoch == self.config.train.epochs - 1
+            if (isbest or is_last) and loginfo is not None:
+                self.save_checkpoint(
+                    epoch, self.max_accuracy, loginfo, isbest=isbest, is_last=is_last
+                )
 
             # make log tensorboard
             self.fabric.log_dict(tensorboard_log, epoch)
             self.fabric.log("lr", self.optimizer.param_groups[-1]["lr"], epoch)
+
+        total_time = time.time() - start_time
+        self.logger.info(f"Training time {datetime.timedelta(seconds=int(total_time))!s}")
 
     def train_one_epoch(self, data_loader):
         self.model.train()
@@ -103,12 +117,15 @@ class ClsTrainer(BaseTrainer):
 
         start = time.time()
         end = time.time()
+        accum = max(1, int(self.config.train.accumulation_steps))
         for idx, (samples, labels) in enumerate(data_loader):
             labels = labels.long()
             outputs = self.model(samples)
 
-            # gradient accumulation
-            is_accumulating = idx % self.config.train.accumulation_steps != 0
+            # Tich luy gradient: step sau moi `accum` micro-batch.
+            # Ban cu dung `idx % accum != 0` -> step ngay tai idx=0 (chua tich
+            # luy gi) va crash ZeroDivisionError khi accum=0.
+            is_accumulating = (idx + 1) % accum != 0
             with self.fabric.no_backward_sync(self.model, enabled=is_accumulating):
                 loss = self.criterion(outputs, labels)
                 # .backward() accumulates when .zero_grad() wasn't called
@@ -128,10 +145,11 @@ class ClsTrainer(BaseTrainer):
                 self.optimizer.zero_grad()
                 if "plateau" not in type(self.lr_scheduler).__name__.lower():
                     self.lr_scheduler.step_update(self.epoch * num_steps + idx)
+                # chi ghi nhan o buoc that su step (ban cu update 2 lan, va
+                # doc `grad_norm` chua gan o micro-batch dau tien)
                 norm_meter.update(grad_norm)
 
             loss_meter.update(loss.item(), labels.size(0))
-            norm_meter.update(grad_norm)
             batch_time.update(time.time() - end)
             end = time.time()
 
@@ -258,22 +276,59 @@ class ClsTrainer(BaseTrainer):
             fmt="%d",
         )
 
-    def save_checkpoint(self, epoch, max_accuracy, loginfo, isbest=False):
-        # best or save_freq or last epoch
+    def save_checkpoint(self, epoch, max_accuracy, loginfo, isbest=False, is_last=False):
+        """Ghi ca `best_ckpt.pth` va `last_ckpt.pth`, kem ban deploy/pretrain."""
         self.fabric.barrier()
-        checkpoint_name = "best_ckpt.pth" if isbest else f"ckpt_epoch_{epoch}.pth"
         self.state.update({"epoch": epoch, "max_accuracy": max_accuracy})
-        self.fabric.save(os.path.join(self.config.output, checkpoint_name), self.state)
-        isbest = False
 
-        with self.fabric.rank_zero_first():
+        if isbest:
+            self.fabric.save(
+                os.path.join(self.config.output, "best_ckpt.pth"), self.state
+            )
+            self.export_checkpoints("best", epoch, max_accuracy, with_pretrain=False)
+        if is_last:
+            self.fabric.save(
+                os.path.join(self.config.output, "last_ckpt.pth"), self.state
+            )
+            self.export_checkpoints("last", epoch, max_accuracy, with_pretrain=True)
+
+        if self.fabric.global_rank == 0:
             plot_path_dir = os.path.join(
                 self.config.output, f"best{epoch}_acc{max_accuracy:.3f}"
             )
             os.makedirs(plot_path_dir, exist_ok=True)
+            with open(os.path.join(plot_path_dir, "loginfo.pkl"), "wb") as f:
+                pickle.dump(loginfo, f)
+        self.fabric.barrier()
 
-        with open(os.path.join(plot_path_dir, "loginfo.pkl"), "wb") as f:
-            pickle.dump(loginfo, f)
+    def export_checkpoints(self, kind, epoch, acc, with_pretrain=False):
+        """Xuat ban dung ngoai vao <output>/export/ — xem SegTrainer.export_checkpoints."""
+        if self.fabric.global_rank != 0:
+            return
+        export_dir = os.path.join(self.config.output, EXPORT_DIRNAME)
+        os.makedirs(export_dir, exist_ok=True)
+
+        meta = {
+            "epoch": epoch,
+            "accuracy": float(acc),
+            "img_size": int(self.config.data.img_size),
+            "num_classes": int(self.config.data.num_classes),
+            "class_names": list(self.row_name),
+            "dataset": str(self.config.data.name),
+        }
+
+        deploy_path = os.path.join(export_dir, f"{kind}_deploy.pth")
+        save_deploy_checkpoint(
+            deploy_path, self.model, self.deploy_model_cfg, task="Cls", meta=meta
+        )
+        self.logger.info(f"Exported deploy checkpoint -> {deploy_path}")
+
+        if with_pretrain:
+            pretrain_path = os.path.join(export_dir, f"{kind}_pretrain.pth")
+            save_pretrain_checkpoint(
+                pretrain_path, self.model, self.deploy_model_cfg, meta=meta
+            )
+            self.logger.info(f"Exported pretrain checkpoint -> {pretrain_path}")
 
 
 if __name__ == "__main__":

@@ -11,10 +11,10 @@ argparse._ActionsContainer._check_help = lambda self, action: None
 # ----------------------------------------------------------------
 
 import hydra
+import torch
 from omegaconf import DictConfig
 
-import torch
-torch.set_float32_matmul_precision("high") 
+torch.set_float32_matmul_precision("high")
 
 
 @hydra.main(

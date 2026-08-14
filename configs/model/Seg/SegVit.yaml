@@ -25,6 +25,9 @@ model:
       # add by upernet
       use_abs_pos_emb: false
       use_rel_pos_bias: true
+      # true = doi ~30% toc do lay lai phan lon VRAM cua activation.
+      # Bat khi muon tang batch_size hoac img_size ma het VRAM.
+      use_checkpoint: false
       # (audit #3) KIEM TRA checkpoint truoc khi bat 2 dong duoi:
       # neu checkpoint chua blocks.*.attn.q_bias / gamma_1 thi PHAI bat,
       # khong thi cac trong so do bi bo qua trong im lang.

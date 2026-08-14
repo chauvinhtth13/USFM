@@ -1,225 +1,273 @@
----
-
 <div align="center">
 
-# UltraSound Foundation Model (USFM)
+# USFM — Ultrasound Foundation Model
 
-<a href="https://pytorch.org/get-started/locally/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white"></a>
-<a href="https://pytorchlightning.ai/"><img alt="Lightning" src="https://img.shields.io/badge/-Lightning-792ee5?logo=pytorchlightning&logoColor=white"></a>
-<a href="https://hydra.cc/"><img alt="Config: Hydra" src="https://img.shields.io/badge/Config-Hydra-89b8cd"></a>
-<a href="https://github.com/ashleve/lightning-hydra-template"><img alt="Template" src="https://img.shields.io/badge/-Lightning--Hydra--Template-017F2F?style=flat&logo=github&labelColor=gray"></a><br>
+**Muscle segmentation on ultrasound imagery, built on the USFM foundation model.**
+
+<a href="https://pytorch.org/get-started/locally/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-2.13-ee4c2c?logo=pytorch&logoColor=white"></a>
+<a href="https://lightning.ai/docs/fabric/stable/"><img alt="Lightning Fabric" src="https://img.shields.io/badge/Lightning-Fabric-792ee5?logo=lightning&logoColor=white"></a>
+<a href="https://hydra.cc/"><img alt="Hydra" src="https://img.shields.io/badge/Config-Hydra-89b8cd"></a>
+<img alt="Python" src="https://img.shields.io/badge/Python-3.12%2B-3776ab?logo=python&logoColor=white">
+<a href="#license-and-citation"><img alt="License" src="https://img.shields.io/badge/License-CC--BY--NC%204.0-lightgrey"></a>
 
 </div>
 
 ---
 
-### ✨✨✨ Version V2 updates the code structure to make it more user-friendly for users to customize their own datasets, model structures, and training processes.
+A fork of [openmedlab/USFM](https://github.com/openmedlab/USFM), restructured to run on
+a current Python and PyTorch stack and extended for standalone inference.
+
+The upstream project depends on `mmcv` and `mmsegmentation`, neither of which ship
+wheels for Python 3.12+. Both have been removed: the model is now assembled from plain
+`nn.Module` containers, which unblocks PyTorch 2.13 on Python 3.14 and removes the
+transitive `openxlab`/`oss2` dependency chain that pinned `requests==2.28.2`.
+
+| | Upstream | This fork |
+|---|---|---|
+| `mmcv` / `mmsegmentation` | Required | **Removed** |
+| Python | 3.9 | **3.12+** (running 3.14) |
+| PyTorch | 2.4.1 | **2.13** |
+| Model assembly | `mmseg` registry (`EncoderDecoder`) | Plain `nn.Module` — [`usdsgen/models/build.py`](usdsgen/models/build.py) |
+| Attention | Explicit matmul + softmax | `F.scaled_dot_product_attention` (Flash / mem-efficient) |
+| Checkpoints | `best*.pth` only | Adds `last`, plus deployable and pretrain exports ([§5](#5-checkpoint-artifacts)) |
+| Inference | — | Standalone [`inference.py`](inference.py) |
+
+Weights from upstream remain fully compatible: the refactor preserves every
+`state_dict` key, and the attention rewrite is numerically equivalent to within 1e-7.
 
 ---
 
-### ✨✨✨ Latest USFM weight!
+## Contents
 
-The latest weight of USFM has been released ([USFM_latest.pth](https://drive.google.com/file/d/1KRwXZgYterH895Z8EpXpR1L1eSMMJo4q/view?usp=sharing)).
+1. [Installation](#1-installation) · 2. [Pretrained weights](#2-pretrained-weights) ·
+3. [Dataset layout](#3-dataset-layout) · 4. [Training](#4-training) ·
+5. [Checkpoint artifacts](#5-checkpoint-artifacts) · 6. [Inference](#6-inference) ·
+7. [Repository layout](#7-repository-layout) · 8. [Known limitations](#8-known-limitations)
 
 ---
 
-## 💡 Introduction
-
-### Highlights：
-
-1. USFM is the first foundation model for medical ultrasound images, developed and maintained by the Laboratory of Medical Imaging and Artificial Intelligence, Fudan University.
-
-2. USFM aims to accelerate the modeling of existing medical ultrasound image analysis tasks with high performance and efficiency (less labeled data and fewer training epochs).
-
-3. The superior capability of USFM comes from unsupervised pre-training on a large multi-organ, multi-center, multi-device ultrasound database, which contains two million ultrasound images from different ultrasound devices around the globe, which guarantees the generalizability and versatility of USFM.
-
-4. To adapt to the characteristics of ultrasound images, the unsupervised pre-training of the USFM is based on Mask Image Modeling (MIM) with the addition of frequency domain mask learning, which captures the image texture features well.
-
-5. Experiments validate the excellent performance and labeling efficiency of USFM on common disease classification, tissue segmentation and image enhancement tasks. More tasks are in progress.
-
-![USFM](img/USFMFramework.png)
-
-### Paper
-
-[J. Jiao et al., “USFM: A universal ultrasound foundation model generalized to tasks and organs towards label efficient image analysis,” Medical Image Analysis, vol. 96, p. 103202, Aug. 2024, doi: 10.1016/j.media.2024.103202.](https://www.sciencedirect.com/science/article/pii/S1361841524001270)
-
-
-## 📌 Configuring the runtime environment
-
-### 1. Configuring the project
+## 1. Installation
 
 ```bash
-# clone project
-git clone https://github.com/openmedlab/USFM.git
+git clone https://github.com/chauvinhtth13/USFM.git
 cd USFM
 
-# [OPTIONAL] create conda environment
-conda create -n USFM python=3.9
-conda activate USFM
+conda create -n usfm python=3.12 -y
+conda activate usfm
 
-# install pytorch according to instructions
-# https://pytorch.org/get-started/
-pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu118
+# Install PyTorch separately, matched to your CUDA version.
+# See https://pytorch.org/get-started/locally/
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu129
 
-# install requirements
-pip install -r requirements.txt
-
-# install mmcv
-pip install mmcv==2.2.0 -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.4/index.html
-
-
-# install mmsegmentation [important: from modified mmseg]
-mkdir -p useful_modules
-cd useful_modules
-git clone git@github.com:George-Jiao/mmsegmentation.git
-cd mmsegmentation
-git checkout gj_mmcv2_2_0
-pip install -v -e .
-cd ../..
-
+# Everything else. pyproject.toml is the source of truth for dependencies.
+pip install -e .
 ```
 
-### 2. Installing usdsgen (US DownStream Generalizer)
+No `mmcv` installation or `mmsegmentation` fork checkout is required.
 
-usdsgen is a USFM-based ultrasound downstream task generalization package that can be used for downstream tasks on ultrasound images.
+`requirements.txt` lists verified minimum versions and exists for CI and environment
+reproduction; it is not a second dependency declaration.
+
+## 2. Pretrained weights
+
+Download [`USFM_latest.pth`](https://drive.google.com/file/d/1KRwXZgYterH895Z8EpXpR1L1eSMMJo4q/view)
+and place it at `./assets/FMweight/USFM_latest.pth`.
+
+Training without pretrained weights is supported but emits a warning — the label
+efficiency that motivates this model comes from the pretrained backbone.
+
+## 3. Dataset layout
+
+```
+datasets/Seg/<dataset_name>/
+├── training_set/
+│   ├── image/
+│   └── mask/
+├── val_set/
+│   ├── image/
+│   └── mask/
+└── test_set/
+    ├── image/
+    └── mask/
+```
+
+Masks are single-channel images where `0` is background and non-zero is foreground.
+Each mask filename must match its corresponding image filename.
+
+Register the dataset in `configs/data/Seg/<name>.yaml`; use
+[`muscle.yaml`](configs/data/Seg/muscle.yaml) as a template. Paths resolve against
+`data.dataset_path` (default `./datasets/`), so configs stay portable across machines.
+
+A small dataset for smoke-testing the pipeline is available as
+[`Seg_toy_dataset.tar.gz`](https://drive.google.com/file/d/1E3e7mTBdIxj4UOfeUrEFM6GgryXylodG/view)
+(199 train / 50 val / 50 test).
+
+## 4. Training
 
 ```bash
-pip install -v -e .
+python main.py \
+    experiment=task/Seg \
+    data=Seg/muscle \
+    data="{batch_size:8,num_workers:4}" \
+    model=Seg/SegVit \
+    model.model_cfg.backbone.pretrained=./assets/FMweight/USFM_latest.pth \
+    train="{epochs:400,accumulation_steps:1}" \
+    L="{devices:1}" \
+    tag=muscle_r1
 ```
 
-## 📦️ Data preparation
+Classification (`experiment=task/Cls`, `model=Cls/vit`) uses the same entry point and
+expects `ImageFolder`-structured data.
 
-### 1. Datasets Folder
+### Frequently used overrides
 
-You can save datasets in either folder, the default is the folder \[datasets\].
+| Parameter | Effect |
+|---|---|
+| `L.devices` | GPU count (Fabric DDP) |
+| `L.precision` | Default `bf16-mixed` |
+| `train.compile` | Compile the backbone with `torch.compile` |
+| `train.auto_resume` | Resume from the most recent checkpoint |
+| `train.layer_decay` | Layer-wise LR decay (`0.65` for segmentation; `1.0` disables) |
+| `model.model_cfg.backbone.use_checkpoint` | Gradient checkpointing — trades ~30% throughput for a large activation-memory reduction |
+| `data.img_size` | Default `512` |
 
-The folder format is generally:
+Outputs are written to
+`logs/finetune/<task>/<dataset>/<model>/<tag>/<timestamp>/`, alongside TensorBoard
+logs and per-validation metrics in `allsegmetrics.csv`.
+
+## 5. Checkpoint artifacts
+
+Each run produces three kinds of checkpoint, serving three distinct purposes:
+
+```
+best<epoch>.pth              # resumable training state
+last<epoch>.pth              # resumable training state, final epoch
+export/
+├── best_deploy.pth          # self-describing, for inference
+├── last_deploy.pth
+└── last_pretrain.pth        # backbone only, for the next fine-tune
+```
+
+| Artifact | Contents | Use case |
+|---|---|---|
+| `best*.pth` / `last*.pth` | Model, optimizer, scheduler, config | Resume training, or `mode=test` |
+| `export/*_deploy.pth` | Model, **architecture**, preprocessing parameters | Inference; sharing with downstream users |
+| `export/last_pretrain.pth` | Backbone weights only | Initialising a fine-tune on a new dataset |
+
+### Deploy checkpoints
+
+A deploy checkpoint embeds its own `model_cfg` along with `img_size` and the
+normalisation constants. Consumers do not declare the architecture, and cannot
+silently mismatch preprocessing — a failure mode that degrades predictions without
+raising an error.
+
+```python
+from usdsgen.models.build import load_deploy_checkpoint
+
+model, meta = load_deploy_checkpoint("logs/.../export/best_deploy.pth", device="cuda")
+# meta -> {'epoch': 80, 'dice': 0.971, 'img_size': 512, 'num_classes': 2,
+#          'norm_mean': [...], 'norm_std': [...], 'dataset': 'muscle'}
+```
+
+These load under `torch.load(..., weights_only=True)`, so consuming one does not
+require trusting a pickle.
+
+### Continuing from a previous run
 
 ```bash
-datasets/
-    ├── Seg/
-        ├── dataset_names/
-            ├── trainning_set/
-                ├── image/ img1.png..
-                ├── mask/ img1.png..
-            ├── val_set/
-                ├── image/
-                ├── mask/
-            ├── test_set/
-                ├── image/
-                ├── mask/
-    |── Cls/
-        ├── dataset_names/
-            ├── trainning_set/
-                |── class1/
-                |── class2/
-            ├── val_set/
-                |── class1/
-                |── class2/
-            ├── test_set/
-                |── class1/
-                |── class2/
+python main.py experiment=task/Seg data=Seg/<new_dataset> model=Seg/SegVit \
+    model.model_cfg.backbone.pretrained=logs/.../export/last_pretrain.pth \
+    tag=round2
 ```
 
-\*\*\*\* Advanced: data configuration in folder \[configs/data/\]
+The task head is deliberately excluded — it is tied to the class count of the
+previous task.
 
-### 2. An example toy dataset for segmentation task
-
-Download the Seg_toy_dataset from Google Drive [Seg_toy_dataset.tar.gz](https://drive.google.com/file/d/1E3e7mTBdIxj4UOfeUrEFM6GgryXylodG/view?usp=sharing) and save it in folder \[./datasets\].
-
-\*\* The toy dataset is just for running purposes only, containing 199 images for training, 50 images for validation, and 50 images for testing.
+## 6. Inference
 
 ```bash
-mkdir -p ./datasets/Seg/
-tar -xzvf ./datasets/Seg_toy_dataset.tar.gz -C ./datasets/Seg/
+python inference.py \
+    --ckpt logs/.../export/best_deploy.pth \
+    --input datasets/Seg/muscle/test_set/image \
+    --output inference_out
 ```
 
-## 🚀 Finetuning USFM on the downstream dataset
+Produces:
 
-### 1. Download the USFM weights
+| Output | Contents |
+|---|---|
+| `mask/` | Binary masks at original image resolution |
+| `overlay/` | Source image with the predicted region shaded and outlined |
+| `panel/` | Side-by-side: source, prediction, GT comparison, confidence map |
+| `report.csv` | Per-image statistics and metrics |
 
-Download the USFM weight from Google Drive [USFM_latest.pth](https://drive.google.com/file/d/1KRwXZgYterH895Z8EpXpR1L1eSMMJo4q/view) and save it in \[./assets/FMweight/USFM_latest.path\].
+When ground-truth masks are found — either via `--mask-dir` or by substituting
+`image/` with `mask/` in the input path — the script reports Dice, IoU, precision and
+recall, aggregates them by data source, and lists the worst-scoring images.
 
-### 2. Finetuning USFM for the downstream task
+Logits are interpolated to the original resolution *before* `argmax`, which is more
+faithful than resizing the predicted mask.
 
-```bash
-# setting the environment variable
-export batch_size=16
-export num_workers=4
-export CUDA_VISIBLE_DEVICES=0,1,2
-export devices=3 # number of GPUs
-export dataset=toy_dataset
-export epochs=400
-export pretrained_path=./assets/FMweight/USFM_latest.pth
-export task=Seg   # Cls for classification, Seg for segmentation
-export model=Seg/SegVit # SegVit or Upernet for segmentation, vit for classification
+Ordinary training checkpoints also work, but require `--img-size` to be passed
+explicitly and to match the value used during training.
 
-# Segmentation task
-python main.py experiment=task/$task data=Seg/$dataset data="{batch_size:$batch_size,num_workers:$num_workers}" \
-    model=$model model.model_cfg.backbone.pretrained=$pretrained_path \
-    train="{epochs:$epochs, accumulation_steps:1}" L="{devices:$devices}" tag=USFM
-
-
-# Classification task
-export task=Cls
-export model=Cls/vit
-python main.py experiment=task/$task data=Cls/$dataset data="{batch_size:$batch_size,num_workers:$num_workers}" \
-    model=$model model.model_cfg.backbone.pretrained=$pretrained_path \
-    train="{epochs:$epochs, accumulation_steps:1}" L="{devices:$devices}" tag=USFM
-```
-
-## 📈 Results Folder
-
-The results of the experiment are saved in the logs/fineturne folder.
-
-## 🙋‍♀️ Advanced: Code Structure
+## 7. Repository layout
 
 ```mermaid
 graph TD;
-    endpoint[main.py] --> trainers[usdsgen/trainer/ <br/> configs/experiment/]
-    trainers[usdsgen/trainer/ <br/> configs/experiment/] --> data[usdsgen/data/ <br/> configs/data/]
-    trainers[usdsgen/trainers.py <br/> configs/experiment/] --> model[usdsgen/model/ <br/> configs/model/]
+    A[main.py] --> B[usdsgen/trainer/<br/>SegTrainer · ClsTrainer]
+    B --> C[usdsgen/data/<br/>configs/data/]
+    B --> D[usdsgen/models/build.py<br/>configs/model/]
+    D --> E[modules/backbone/segbackbone.py<br/>HVITBackbone4Seg]
+    D --> F[modules/head/seg/ATMHead.py<br/>+ losses/atm_loss.py]
+    G[inference.py] --> D
 ```
 
-\*\*\*\* You can conveniently configure different models, datasets, and training processes in the usdsgen and configs folder.
+| Path | Responsibility |
+|---|---|
+| [`main.py`](main.py) | Hydra entry point; selects the trainer from `config.task` |
+| [`usdsgen/trainer/`](usdsgen/trainer/) | Train / validate / test loops on Lightning Fabric |
+| [`usdsgen/models/build.py`](usdsgen/models/build.py) | Assembles backbone and head; loads deploy checkpoints |
+| [`usdsgen/data/`](usdsgen/data/) | Datasets and Albumentations transforms |
+| [`usdsgen/utils/metrics.py`](usdsgen/utils/metrics.py) | Dice, IoU, HD95 (via MONAI) |
+| [`usdsgen/utils/modelutils.py`](usdsgen/utils/modelutils.py) | Checkpoint export and pretrained-weight remapping |
+| [`configs/`](configs/) | Hydra configs, grouped as `data` / `model` / `experiment` |
 
-## 🛡️ License
+## 8. Known limitations
 
-This project is under the CC-BY-NC 4.0 license. See [LICENSE](LICENSE) for details.
+- **Only `SegVit` is supported.** The `Upernet` configuration was removed along with
+  `mmsegmentation`, since `UPerHead` and `FCNHead` are mmseg components.
+- **HD95 is not comparable to the upstream baseline.** It is now computed by MONAI
+  (95th-percentile Hausdorff, Euclidean) rather than the unmaintained `hausdorff`
+  package (raw Hausdorff, Manhattan). The change is deliberate and clinically more
+  standard, but the numbers are on a different scale.
+- **`train.layer_decay` now takes effect for segmentation.** It was previously
+  ignored: the config specified `0.65`, but `build_optimizer` only applied layer-wise
+  decay when `model_cfg.type` was `swin` or `vit`, while segmentation declares
+  `EncoderDecoder`. Results will differ from runs made before this fix; pass
+  `train.layer_decay=1.0` to reproduce the earlier behaviour.
+- **The FPN uses `nn.SyncBatchNorm` unconditionally**
+  ([`segbackbone.py`](usdsgen/modules/backbone/segbackbone.py)). This is correct under
+  DDP and falls back to standard behaviour on a single device, but it is not
+  configurable and can cause graph breaks under `torch.compile`.
+- **No automated test suite.** CI runs import and forward-pass smoke tests only.
 
-## 🙏 Acknowledgement
+## License and citation
 
-Our code is based on [transformer](https://github.com/huggingface/transformers), [pytorch-image-models
-](https://github.com/huggingface/pytorch-image-models), and [lightning-hydra-template
-](https://github.com/ashleve/lightning-hydra-template). Thanks them for releasing their codes.
-
-## 💚 Contribution
-
-Have a question? Found a bug? Missing a specific feature? Feel free to file a new issue, discussion or PR with respective title and description.
-
-Please perform a code check before committing with the pre-commit hooks.
-
-```bash
-# pip install pre-commit
-pre-commit install
-pre-commit run -a
-```
-
-## Citation
-
-If you find the USFM or this project useful in your research, please consider cite:
+This project inherits the CC-BY-NC 4.0 license from upstream.
 
 ```bibtex
 @article{JIAO2024103202,
-title = {USFM: A universal ultrasound foundation model generalized to tasks and organs towards label efficient image analysis},
-journal = {Medical Image Analysis},
-volume = {96},
-pages = {103202},
-year = {2024},
-issn = {1361-8415},
-doi = {https://doi.org/10.1016/j.media.2024.103202},
-url = {https://www.sciencedirect.com/science/article/pii/S1361841524001270},
-author = {Jing Jiao, Jin Zhou, Xiaokang Li, ..., Yuanyuan Wang and Yi Guo},
-keywords = {Ultrasound image, Foundation model, Label efficiency, Task adaptability},
+  title   = {USFM: A universal ultrasound foundation model generalized to tasks and organs towards label efficient image analysis},
+  journal = {Medical Image Analysis},
+  volume  = {96},
+  pages   = {103202},
+  year    = {2024},
+  doi     = {10.1016/j.media.2024.103202},
+  author  = {Jing Jiao and Jin Zhou and Xiaokang Li and others and Yuanyuan Wang and Yi Guo},
 }
 ```
+
+Built on [transformers](https://github.com/huggingface/transformers),
+[timm](https://github.com/huggingface/pytorch-image-models), and
+[lightning-hydra-template](https://github.com/ashleve/lightning-hydra-template).

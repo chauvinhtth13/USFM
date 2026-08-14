@@ -2,9 +2,10 @@ import math
 from functools import partial
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from omegaconf import OmegaConf
 from timm.layers import DropPath, to_2tuple, trunc_normal_
+from torch import nn
 
 from usdsgen.utils.modelutils import load_pretrained
 
@@ -77,7 +78,9 @@ class Attention(nn.Module):
             # get pair-wise relative position index for each token inside the window
             coords_h = torch.arange(window_size[0])
             coords_w = torch.arange(window_size[1])
-            coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))  # 2, Wh, Ww
+            coords = torch.stack(
+                torch.meshgrid([coords_h, coords_w], indexing="ij")
+            )  # 2, Wh, Ww
             coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
             relative_coords = (
                 coords_flatten[:, :, None] - coords_flatten[:, None, :]
@@ -126,9 +129,8 @@ class Attention(nn.Module):
             qkv[2],
         )  # make torchscript happy (cannot use tensor as tuple)
 
-        q = q * self.scale
-        attn = q @ k.transpose(-2, -1)
-
+        # Gop bias vi tri thanh attn_mask cong them, xem ghi chu o segbackbone.py
+        attn_bias = None
         if self.relative_position_bias_table is not None:
             relative_position_bias = self.relative_position_bias_table[
                 self.relative_position_index.view(-1)
@@ -137,18 +139,26 @@ class Attention(nn.Module):
                 self.window_size[0] * self.window_size[1] + 1,
                 -1,
             )  # Wh*Ww,Wh*Ww,nH
-            relative_position_bias = relative_position_bias.permute(
-                2, 0, 1
-            ).contiguous()  # nH, Wh*Ww, Wh*Ww
-            attn = attn + relative_position_bias.unsqueeze(0)
+            attn_bias = (
+                relative_position_bias.permute(2, 0, 1).contiguous().unsqueeze(0)
+            )  # 1, nH, Wh*Ww, Wh*Ww
 
         if rel_pos_bias is not None:
-            attn = attn + rel_pos_bias
+            attn_bias = rel_pos_bias if attn_bias is None else attn_bias + rel_pos_bias
 
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
+        if attn_bias is not None:
+            attn_bias = attn_bias.to(q.dtype)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, -1)
+        x = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_bias,
+            dropout_p=self.attn_drop.p if self.training else 0.0,
+            scale=self.scale,
+        )
+
+        x = x.transpose(1, 2).reshape(B, N, -1)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -194,12 +204,8 @@ class Block(nn.Module):
         )
 
         if init_values is not None:
-            self.gamma_1 = nn.Parameter(
-                init_values * torch.ones(dim), requires_grad=True
-            )
-            self.gamma_2 = nn.Parameter(
-                init_values * torch.ones(dim), requires_grad=True
-            )
+            self.gamma_1 = nn.Parameter(init_values * torch.ones(dim), requires_grad=True)
+            self.gamma_2 = nn.Parameter(init_values * torch.ones(dim), requires_grad=True)
         else:
             self.gamma_1, self.gamma_2 = None, None
 
@@ -235,9 +241,9 @@ class PatchEmbed(nn.Module):
     def forward(self, x, **kwargs):
         B, C, H, W = x.shape
         # FIXME look at relaxing size constraints
-        assert (
-            H == self.img_size[0] and W == self.img_size[1]
-        ), f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        assert H == self.img_size[0] and W == self.img_size[1], (
+            f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        )
         x = self.proj(x).flatten(2).transpose(1, 2)
         return x
 
@@ -257,14 +263,14 @@ class RelativePositionBias(nn.Module):
         # get pair-wise relative position index for each token inside the window
         coords_h = torch.arange(window_size[0])
         coords_w = torch.arange(window_size[1])
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))  # 2, Wh, Ww
+        coords = torch.stack(
+            torch.meshgrid([coords_h, coords_w], indexing="ij")
+        )  # 2, Wh, Ww
         coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
         relative_coords = (
             coords_flatten[:, :, None] - coords_flatten[:, None, :]
         )  # 2, Wh*Ww, Wh*Ww
-        relative_coords = relative_coords.permute(
-            1, 2, 0
-        ).contiguous()  # Wh*Ww, Wh*Ww, 2
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
         relative_coords[:, :, 0] += window_size[0] - 1  # shift to start from 0
         relative_coords[:, :, 1] += window_size[1] - 1
         relative_coords[:, :, 0] *= 2 * window_size[1] - 1
@@ -455,29 +461,20 @@ class VisionTransformer(nn.Module):
         return x
 
 
-def make(**config):
-    print(config)
-
-
 def build_vit(model_cfg, logger):
     model = VisionTransformer(norm_layer=partial(nn.LayerNorm, eps=1e-6), **model_cfg)
-    if model_cfg.pretrained:
-        load_pretrained(model_cfg, model, logger)
-    return model
 
-    # img_size=config.data.img_size,
-    # patch_size=config.model.vit.patch_size,
-    # in_chans=config.model.vit.in_chans,
-    # num_classes=config.model.num_classes,
-    # embed_dim=config.model.vit.embed_dim,
-    # depth=config.model.vit.depth,
-    # num_heads=config.model.vit.num_heads,
-    # mlp_ratio=config.model.vit.mlp_ratio,
-    # qkv_bias=config.model.vit.qkv_bias,
-    # drop_rate=config.model.drop_rate,
-    # drop_path_rate=config.model.drop_path_rate,
-    #         init_values=config.model.vit.init_values,
-    # use_abs_pos_emb=config.model.vit.use_ape,
-    # use_rel_pos_bias=config.model.vit.use_rpb,
-    # use_shared_rel_pos_bias=config.model.vit.use_shared_rpb,
-    # use_mean_pooling=config.model.vit.use_mean_pooling,
+    # configs/model/Cls/vit.yaml (va README) dat duong dan o backbone.pretrained;
+    # ban cu doc model_cfg.pretrained -> khong ton tai -> Cls khong bao gio nap
+    # duoc trong so USFM. Chap nhan ca hai cho de config cu van chay.
+    pretrained = model_cfg.get("pretrained") or model_cfg.get("backbone", {}).get(
+        "pretrained"
+    )
+    if pretrained:
+        cfg = OmegaConf.create({"pretrained": pretrained, "type": model_cfg.type})
+        load_pretrained(cfg, model, logger)
+    elif logger is not None:
+        logger.warning(
+            "backbone.pretrained = null -> train tu dau, KHONG dung trong so USFM."
+        )
+    return model

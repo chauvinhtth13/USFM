@@ -1,7 +1,8 @@
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 import torch.nn.functional as F
+import torchvision
+from torch import Tensor, nn
 
 
 # from .criterion_point import SetCriterion_point
@@ -117,9 +118,7 @@ def dice_loss(inputs, targets, num_masks):
     return loss.sum() / num_masks
 
 
-def sigmoid_focal_loss(
-    inputs, targets, num_masks, alpha: float = 0.25, gamma: float = 2
-):
+def sigmoid_focal_loss(inputs, targets, num_masks, alpha: float = 0.25, gamma: float = 2):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
     Args:
@@ -260,10 +259,11 @@ class SetCriterion(nn.Module):
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
-        outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
+        # (con lai tu DETR) o day goc dung Hungarian matcher tren
+        # outputs_without_aux; ATM khong matching ma gan query theo chi so lop,
+        # nen bien do khong duoc dung -> da bo.
 
         # Retrieve the matching between the outputs of the last layer and the targets
-
         labels = [x["labels"] for x in targets]
         indices_new = []
         for label in labels:
@@ -289,9 +289,7 @@ class SetCriterion(nn.Module):
             for i, aux_outputs in enumerate(outputs["aux_outputs"]):
                 # use the indices as the last stage
                 for loss in self.losses:
-                    l_dict = self.get_loss(
-                        loss, aux_outputs, targets, indices, num_masks
-                    )
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
                     l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
@@ -300,15 +298,8 @@ class SetCriterion(nn.Module):
 
 # Copyright (c) Facebook, Inc. and its affiliates.
 # Modified by Bowen Cheng from https://github.com/facebookresearch/detr/blob/master/util/misc.py
-"""
-Misc functions, including distributed helpers.
-
-Mostly copy-paste from torchvision references.
-"""
-from typing import List, Optional
-
-import torchvision
-from torch import Tensor
+# Misc functions, including distributed helpers.
+# Mostly copy-paste from torchvision references.
 
 
 def _max_by_axis(the_list):
@@ -321,12 +312,12 @@ def _max_by_axis(the_list):
 
 
 class NestedTensor:
-    def __init__(self, tensors, mask: Optional[Tensor]):
+    def __init__(self, tensors, mask: Tensor | None):
         self.tensors = tensors
         self.mask = mask
 
     def to(self, device):
-        # type: (Device) -> NestedTensor # noqa
+        # type: (Device) -> NestedTensor
         cast_tensor = self.tensors.to(device)
         mask = self.mask
         if mask is not None:
@@ -343,7 +334,7 @@ class NestedTensor:
         return str(self.tensors)
 
 
-def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
+def nested_tensor_from_tensor_list(tensor_list: list[Tensor]):
     # TODO make this more general
     if tensor_list[0].ndim == 3:
         if torchvision._is_tracing():
@@ -371,7 +362,7 @@ def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
 # _onnx_nested_tensor_from_tensor_list() is an implementation of
 # nested_tensor_from_tensor_list() that is supported by ONNX tracing.
 @torch.jit.unused
-def _onnx_nested_tensor_from_tensor_list(tensor_list: List[Tensor]) -> NestedTensor:
+def _onnx_nested_tensor_from_tensor_list(tensor_list: list[Tensor]) -> NestedTensor:
     max_size = []
     for i in range(tensor_list[0].dim()):
         max_size_i = torch.max(

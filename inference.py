@@ -12,15 +12,19 @@ Xuat ra:
   <output>/report.csv  thong ke tung anh
 
 Vi du:
-    # 1 anh — tu tim GT trong .../mask/ neu co
-    python inference.py --ckpt .../best92.pth --input anh.png
+    # Deploy checkpoint (khuyen dung): kien truc + img_size + mean/std nam san
+    # trong file, khong can truyen --img-size / --num-classes
+    python inference.py --ckpt logs/.../export/best_deploy.pth --input anh.png
 
     # ca thu muc
-    python inference.py --ckpt .../best92.pth \\
+    python inference.py --ckpt logs/.../export/best_deploy.pth \\
         --input datasets/Seg/muscle_subj/test_set/image \\
         --output test_out
 
-Luu y: --img-size PHAI trung voi luc train (mac dinh 512).
+    # Checkpoint train thuong van chay duoc, nhung phai tu khai kien truc
+    python inference.py --ckpt logs/.../best92.pth --input anh.png --img-size 512
+
+Luu y: voi checkpoint train thuong, --img-size PHAI trung luc train (mac dinh 512).
 """
 
 from __future__ import annotations
@@ -35,16 +39,17 @@ import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont
 
-from usdsgen.models.build import build_seg_model
+from usdsgen.models.build import build_seg_model, load_deploy_checkpoint
+from usdsgen.utils.modelutils import DEPLOY_FORMAT
 
 VALID_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
-CLR_PRED = (0, 255, 128)   # xanh la    — vung du doan
-CLR_TP = (0, 220, 90)      # xanh la    — dung
-CLR_FP = (255, 70, 70)     # do         — thua
-CLR_FN = (70, 140, 255)    # xanh duong — bo sot
+CLR_PRED = (0, 255, 128)  # xanh la    — vung du doan
+CLR_TP = (0, 220, 90)  # xanh la    — dung
+CLR_FP = (255, 70, 70)  # do         — thua
+CLR_FN = (70, 140, 255)  # xanh duong — bo sot
 
 
 # --------------------------------------------------------------------------- #
@@ -101,27 +106,57 @@ def extract_state_dict(ckpt) -> dict:
     sd = {k: v for k, v in sd.items() if isinstance(v, torch.Tensor)}
     for prefix in ("module.", "_orig_mod."):  # DDP / torch.compile
         if sd and all(k.startswith(prefix) for k in sd):
-            sd = {k[len(prefix):]: v for k, v in sd.items()}
+            sd = {k[len(prefix) :]: v for k, v in sd.items()}
     return sd
 
 
 def load_model(ckpt_path: str, img_size: int, num_classes: int, device: str):
+    """Nap model tu checkpoint. Tra ve (model, cfg) voi cfg gom img_size/mean/std.
+
+    Uu tien deploy checkpoint (export/*_deploy.pth): kien truc va tham so tien
+    xu ly nam san trong file, khong can doan --img-size / --num-classes nua.
+    Checkpoint train thuong (best*.pth) van dung duoc theo duong cu.
+    """
     try:
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     except Exception:
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
+    # --- deploy checkpoint: tu chua kien truc ---
+    if isinstance(ckpt, dict) and ckpt.get("format") == DEPLOY_FORMAT:
+        model, meta = load_deploy_checkpoint(ckpt_path, device=device)
+        cfg = {
+            "img_size": int(meta.get("img_size", img_size)),
+            "num_classes": int(meta.get("num_classes", num_classes)),
+            "mean": np.array(meta.get("norm_mean", IMAGENET_MEAN), dtype=np.float32),
+            "std": np.array(meta.get("norm_std", IMAGENET_STD), dtype=np.float32),
+        }
+        print(
+            f"[model] deploy checkpoint : {Path(ckpt_path).name} "
+            f"(epoch {meta.get('epoch')}, dice {meta.get('dice')})"
+        )
+        print(
+            f"[model] kien truc doc tu checkpoint: img_size={cfg['img_size']} "
+            f"num_classes={cfg['num_classes']}"
+        )
+        return model, cfg
+
+    # --- checkpoint train thuong: phai tu khai kien truc ---
     epoch = ckpt.get("epoch") if isinstance(ckpt, dict) else None
     sd = extract_state_dict(ckpt)
     model = build_seg_model(default_model_cfg(img_size, num_classes), logger=None)
     msg = model.load_state_dict(sd, strict=False)
     missing = [k for k in msg.missing_keys if "relative_position_index" not in k]
 
-    print(f"[model] checkpoint : {Path(ckpt_path).name}"
-          + (f" (epoch {epoch})" if epoch is not None else ""))
+    print(
+        f"[model] checkpoint : {Path(ckpt_path).name}"
+        + (f" (epoch {epoch})" if epoch is not None else "")
+    )
     if missing or msg.unexpected_keys:
-        print(f"[model] CANH BAO missing={len(missing)} "
-              f"unexpected={len(msg.unexpected_keys)}")
+        print(
+            f"[model] CANH BAO missing={len(missing)} "
+            f"unexpected={len(msg.unexpected_keys)}"
+        )
         if missing[:3]:
             print(f"          vi du missing   : {missing[:3]}")
         if list(msg.unexpected_keys)[:3]:
@@ -134,19 +169,24 @@ def load_model(ckpt_path: str, img_size: int, num_classes: int, device: str):
         print(f"[model] nap {len(sd)} tensors, khop hoan toan")
 
     model.eval().to(device)
-    return model
+    return model, {
+        "img_size": img_size,
+        "num_classes": num_classes,
+        "mean": IMAGENET_MEAN,
+        "std": IMAGENET_STD,
+    }
 
 
 # --------------------------------------------------------------------------- #
 # Tien / hau xu ly
 # --------------------------------------------------------------------------- #
-def preprocess(path: Path, img_size: int):
+def preprocess(path: Path, img_size: int, mean=IMAGENET_MEAN, std=IMAGENET_STD):
     """Khop val_transforms. Tra ve (tensor CHW, (H_goc, W_goc))."""
     img = Image.open(path).convert("RGB")
     orig_hw = (img.height, img.width)
     img = img.resize((img_size, img_size), Image.BILINEAR)
     arr = np.asarray(img, dtype=np.float32) / 255.0
-    arr = (arr - IMAGENET_MEAN) / IMAGENET_STD
+    arr = (arr - mean) / std
     return torch.from_numpy(arr.transpose(2, 0, 1)), orig_hw
 
 
@@ -277,8 +317,9 @@ def make_panel(tiles, title: str, tile_w: int = 420) -> Image.Image:
     x = pad
     for label, im in resized:
         canvas.paste(im, (x, head + pad))
-        draw.text((x + 4, head + pad + tile_h + 4), label,
-                  fill=(200, 200, 210), font=_font(14))
+        draw.text(
+            (x + 4, head + pad + tile_h + 4), label, fill=(200, 200, 210), font=_font(14)
+        )
         x += tile_w + pad
     return canvas
 
@@ -291,8 +332,11 @@ def source_of(name: str) -> str:
     if low.startswith("gastroc"):
         return "gastroc"
     if low.startswith("deepacsa"):
-        return "deepacsa_rectus" if "rectus" in low else (
-            "deepacsa_vastus" if "vastus" in low else "deepacsa_khac")
+        return (
+            "deepacsa_rectus"
+            if "rectus" in low
+            else ("deepacsa_vastus" if "vastus" in low else "deepacsa_khac")
+        )
     if low.startswith("01nvb"):
         return "01NVb"
     if low.startswith("reboot"):
@@ -314,9 +358,17 @@ def main():
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--input", required=True, help="Anh hoac thu muc anh")
     ap.add_argument("--output", default="inference_out")
-    ap.add_argument("--mask-dir", default=None,
-                    help="Thu muc mask GT (mac dinh: tu doi /image/ -> /mask/)")
-    ap.add_argument("--img-size", type=int, default=512, help="PHAI trung luc train")
+    ap.add_argument(
+        "--mask-dir",
+        default=None,
+        help="Thu muc mask GT (mac dinh: tu doi /image/ -> /mask/)",
+    )
+    ap.add_argument(
+        "--img-size",
+        type=int,
+        default=512,
+        help="PHAI trung luc train (bo qua neu dung deploy checkpoint)",
+    )
     ap.add_argument("--num-classes", type=int, default=2)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -336,16 +388,21 @@ def main():
     if not args.no_panel:
         (out_dir / "panel").mkdir(parents=True, exist_ok=True)
 
-    print(f"[info] {len(files)} anh | device={device} | "
-          f"amp={'bf16' if use_amp else 'off'} | img_size={args.img_size}")
-    model = load_model(args.ckpt, args.img_size, args.num_classes, device)
+    model, mcfg = load_model(args.ckpt, args.img_size, args.num_classes, device)
+    img_size = mcfg["img_size"]
+    print(
+        f"[info] {len(files)} anh | device={device} | "
+        f"amp={'bf16' if use_amp else 'off'} | img_size={img_size}"
+    )
 
     rows: list[dict] = []
     t_start = time.time()
 
     for start in range(0, len(files), args.batch_size):
         chunk = files[start : start + args.batch_size]
-        tensors, sizes = zip(*(preprocess(p, args.img_size) for p in chunk))
+        tensors, sizes = zip(
+            *(preprocess(p, img_size, mcfg["mean"], mcfg["std"]) for p in chunk)
+        )
 
         t0 = time.time()
         logits = predict_batch(model, torch.stack(tensors), device, use_amp)
@@ -356,8 +413,9 @@ def main():
         for i, path in enumerate(chunk):
             h, w = sizes[i]
             # noi suy LOGITS ve kich thuoc goc TRUOC argmax (dung hon resize mask)
-            lg = F.interpolate(logits[i : i + 1], size=(h, w),
-                               mode="bilinear", align_corners=False)
+            lg = F.interpolate(
+                logits[i : i + 1], size=(h, w), mode="bilinear", align_corners=False
+            )
             prob = lg.softmax(dim=1)[0]
             conf_t, pred_t = prob.max(dim=0)
             pred = pred_t.cpu().numpy().astype(np.uint8)
@@ -368,7 +426,8 @@ def main():
             fg = pred > 0
 
             Image.fromarray(fg.astype(np.uint8) * 255).save(
-                out_dir / "mask" / f"{path.stem}.png")
+                out_dir / "mask" / f"{path.stem}.png"
+            )
             make_overlay(img, pred).save(out_dir / "overlay" / f"{path.stem}.png")
 
             ncomp, largest = n_components(pred)
@@ -397,14 +456,19 @@ def main():
                     row.update(seg_metrics(pred, gt))
 
             if not args.no_panel:
-                tiles = [("anh goc", Image.fromarray(img.astype(np.uint8))),
-                         ("du doan (overlay)", make_overlay(img, pred))]
+                tiles = [
+                    ("anh goc", Image.fromarray(img.astype(np.uint8))),
+                    ("du doan (overlay)", make_overlay(img, pred)),
+                ]
                 if gt is not None:
-                    tiles.append(("TP xanh | FP do | FN duong",
-                                  make_compare(img, pred, gt)))
+                    tiles.append(
+                        ("TP xanh | FP do | FN duong", make_compare(img, pred, gt))
+                    )
                 tiles.append(("do tin cay lop co", make_heat(fg_prob)))
-                title = (f"{path.name}   |   {w}x{h}px   |   "
-                         f"vung co {row['fg_ratio'] * 100:.1f}%")
+                title = (
+                    f"{path.name}   |   {w}x{h}px   |   "
+                    f"vung co {row['fg_ratio'] * 100:.1f}%"
+                )
                 if "dice" in row:
                     title += f"   |   Dice {row['dice']:.4f}  IoU {row['iou']:.4f}"
                 make_panel(tiles, title).save(out_dir / "panel" / f"{path.stem}.png")
@@ -416,21 +480,31 @@ def main():
                 print(f"  Nguon du lieu      : {row['source']}")
                 print(f"  Kich thuoc         : {w} x {h} px")
                 print(f"  Thoi gian suy luan : {dt * 1000:.0f} ms")
-                print(f"  Vung co            : {row['fg_px']:,} px "
-                      f"({row['fg_ratio'] * 100:.2f}% anh)")
+                print(
+                    f"  Vung co            : {row['fg_px']:,} px "
+                    f"({row['fg_ratio'] * 100:.2f}% anh)"
+                )
                 if ncomp is not None:
-                    print(f"  Vung lien thong    : {ncomp} "
-                          f"(lon nhat chiem {largest * 100:.1f}%)")
+                    print(
+                        f"  Vung lien thong    : {ncomp} "
+                        f"(lon nhat chiem {largest * 100:.1f}%)"
+                    )
                 print(f"  Do tin cay TB (co) : {row['conf_mean_fg']:.4f}")
-                print(f"  Pixel khong chac   : {row['uncertain_ratio'] * 100:.2f}% "
-                      f"(prob < 0.7)")
+                print(
+                    f"  Pixel khong chac   : {row['uncertain_ratio'] * 100:.2f}% "
+                    f"(prob < 0.7)"
+                )
                 if "dice" in row:
                     print(f"  -- So voi GT: {gt_path.name} --")
-                    print(f"  Dice {row['dice']:.4f} | IoU {row['iou']:.4f} | "
-                          f"Precision {row['precision']:.4f} | "
-                          f"Recall {row['recall']:.4f}")
-                    print(f"  TP {row['tp_px']:,} | FP {row['fp_px']:,} (thua) "
-                          f"| FN {row['fn_px']:,} (sot)")
+                    print(
+                        f"  Dice {row['dice']:.4f} | IoU {row['iou']:.4f} | "
+                        f"Precision {row['precision']:.4f} | "
+                        f"Recall {row['recall']:.4f}"
+                    )
+                    print(
+                        f"  TP {row['tp_px']:,} | FP {row['fp_px']:,} (thua) "
+                        f"| FN {row['fn_px']:,} (sot)"
+                    )
                 else:
                     print("  -- Khong tim thay mask GT, bo qua metric --")
 
@@ -440,8 +514,10 @@ def main():
 
     elapsed = time.time() - t_start
     if not single:
-        print(f"\n[xong] {len(files)} anh trong {elapsed:.1f}s "
-              f"({len(files) / elapsed:.1f} anh/s)")
+        print(
+            f"\n[xong] {len(files)} anh trong {elapsed:.1f}s "
+            f"({len(files) / elapsed:.1f} anh/s)"
+        )
 
     dices = [r["dice"] for r in rows if "dice" in r]
     if dices and not single:
@@ -455,8 +531,10 @@ def main():
         if len(groups) > 1:
             print("[metric] Theo nguon du lieu:")
             for src, vals in sorted(groups.items()):
-                print(f"   {src:16} n={len(vals):5}  Dice={np.mean(vals):.4f} "
-                      f"+/- {np.std(vals):.4f}")
+                print(
+                    f"   {src:16} n={len(vals):5}  Dice={np.mean(vals):.4f} "
+                    f"+/- {np.std(vals):.4f}"
+                )
         worst = sorted((r for r in rows if "dice" in r), key=lambda r: r["dice"])[:5]
         print("[metric] 5 anh te nhat (xem panel de soi loi):")
         for r in worst:

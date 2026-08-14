@@ -11,6 +11,11 @@ from timm.data.transforms import str_to_pil_interp
 from torch.utils.data import Dataset
 from torchvision import datasets
 
+# Tham so chuan hoa cho nhanh Seg. Duoc ghi vao deploy checkpoint va dung lai
+# o inference.py — lech mean/std la kieu loi lam ket qua te di ma khong bao gi.
+SEG_NORM_MEAN = (0.485, 0.456, 0.406)
+SEG_NORM_STD = (0.229, 0.224, 0.225)
+
 
 def build_cls_dataset(config, logger):
     train_transforms = T.Compose(
@@ -74,9 +79,7 @@ def build_seg_dataset(config, logger):
             A.VerticalFlip(p=0.5),
             # A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.5),
             A.ToFloat(max_value=255),
-            A.Normalize(
-                mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), max_pixel_value=1
-            ),
+            A.Normalize(mean=SEG_NORM_MEAN, std=SEG_NORM_STD, max_pixel_value=1),
             ToTensorV2(),
         ]
     )
@@ -84,13 +87,15 @@ def build_seg_dataset(config, logger):
         [
             A.Resize(width=config.data.img_size, height=config.data.img_size),
             A.ToFloat(max_value=255),
-            A.Normalize(
-                mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), max_pixel_value=1
-            ),
+            A.Normalize(mean=SEG_NORM_MEAN, std=SEG_NORM_STD, max_pixel_value=1),
             ToTensorV2(),
         ]
     )
-    Dataset_class = eval(config.data.type + "Dataset")
+    if config.data.type not in SEG_DATASETS:
+        raise KeyError(
+            f"Unknown data.type={config.data.type!r}. Ho tro: {sorted(SEG_DATASETS)}"
+        )
+    Dataset_class = SEG_DATASETS[config.data.type]
 
     dataset_train = Dataset_class(config.data, "train", train_transforms)
     dataset_val = Dataset_class(config.data, "val", val_transforms)
@@ -141,33 +146,6 @@ class SegBaseDataset(Dataset):
         return len(self.image_list)
 
 
-class SegVocDataset(Dataset):
-    def __init__(self, DataConfig, stage, transforms=None):
-        super().__init__()
-        self.update_datalist(DataConfig.path.root, stage, DataConfig.path.image_type)
-        self.transforms = transforms
-
-    def __getitem__(self, index):
-        image_file = self.image_list[index]
-        mask_file = self.mask_list[index]
-        image = np.array(Image.open(image_file).convert("RGB"))
-        mask = np.array(Image.open(mask_file).convert("1")).astype(int)
-        if self.transforms is not None:
-            image_mask = self.transforms(
-                image=image, mask=mask, img_path=image_file, mask_path=mask_file
-            )
-        return image_mask
-
-    def update_datalist(self, root, stage, image_type):
-        filenames = np.loadtxt(
-            os.path.join(root, "ImageSets", stage + ".txt"), dtype=str
-        )
-        image_filenames = [i + "." + image_type for i in filenames]
-        mask_filenames = [i + ".png" for i in filenames]
-        self.image_list = [os.path.join(root, "JPEGImages", i) for i in image_filenames]
-        self.mask_list = [
-            os.path.join(root, "SegmentationClass", i) for i in mask_filenames
-        ]
-
-    def __len__(self):
-        return len(self.image_list)
+# Dang ky dataset theo `data.type` trong configs/data/Seg/*.yaml.
+# Them dataset moi = them mot dong o day (truoc day dung eval()).
+SEG_DATASETS = {"SegBase": SegBaseDataset}

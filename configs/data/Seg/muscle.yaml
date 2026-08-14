@@ -3,7 +3,9 @@ type: "SegBase"
 num_classes: 2
 img_size: 512
 path:
-  root: "/home/vitaleioucru/datasets/Seg/muscle_subj"
+  # Tuong doi theo data.dataset_path (mac dinh ./datasets/) de config chay
+  # duoc tren may khac. Ghi de: data.path.root=/duong/dan/khac
+  root: "${data.dataset_path}/Seg/muscle_subj"
   split:
     train: "training_set"
     val: "val_set"

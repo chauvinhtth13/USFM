@@ -1,12 +1,9 @@
 import math
-from functools import partial
-from typing import Optional
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers import trunc_normal_
-from torch import Tensor
+from torch import Tensor, nn
 from torch.nn import TransformerDecoder, TransformerDecoderLayer
 
 from usdsgen.modules.losses.atm_loss import ATMLoss
@@ -38,10 +35,10 @@ class TPN_Decoder(TransformerDecoder):
         self,
         tgt: Tensor,
         memory: Tensor,
-        tgt_mask: Optional[Tensor] = None,
-        memory_mask: Optional[Tensor] = None,
-        tgt_key_padding_mask: Optional[Tensor] = None,
-        memory_key_padding_mask: Optional[Tensor] = None,
+        tgt_mask: Tensor | None = None,
+        memory_mask: Tensor | None = None,
+        tgt_key_padding_mask: Tensor | None = None,
+        memory_key_padding_mask: Tensor | None = None,
     ):
         output = tgt
         # attns = []
@@ -74,10 +71,10 @@ class TPN_DecoderLayer(TransformerDecoderLayer):
         self,
         tgt: Tensor,
         memory: Tensor,
-        tgt_mask: Optional[Tensor] = None,
-        memory_mask: Optional[Tensor] = None,
-        tgt_key_padding_mask: Optional[Tensor] = None,
-        memory_key_padding_mask: Optional[Tensor] = None,
+        tgt_mask: Tensor | None = None,
+        memory_mask: Tensor | None = None,
+        tgt_key_padding_mask: Tensor | None = None,
+        memory_key_padding_mask: Tensor | None = None,
     ) -> Tensor:
         tgt2 = self.self_attn(
             tgt, tgt, tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask
@@ -140,15 +137,18 @@ class Attention(nn.Module):
             .permute(0, 2, 1, 3)
         )
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn_save = attn.clone()
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
+        # LUU Y: KHONG dung SDPA o day. attn truoc softmax chinh la ban do
+        # phan vung ma ATM tra ve (out["pred_masks"]), ma SDPA khong cho lay
+        # ma tran attention ra.
+        attn_logits = (q @ k.transpose(-2, -1)) * self.scale
+        # softmax/dropout deu tra ve tensor moi (Dropout khong inplace), nen
+        # attn_logits khong bao gio bi ghi de -> ban .clone() cu la thua.
+        attn = self.attn_drop(attn_logits.softmax(dim=-1))
 
         x = (attn @ v).transpose(1, 2).reshape(B, Nq, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x.transpose(0, 1), attn_save.sum(dim=1) / self.num_heads
+        return x.transpose(0, 1), attn_logits.sum(dim=1) / self.num_heads
 
 
 class MLP(nn.Module):
@@ -224,21 +224,21 @@ class ATMHead(nn.Module):
                 trunc_normal_(proj.weight, std=0.02)
             else:
                 proj = nn.Identity()
-            self.add_module("input_proj_{}".format(i + 1), proj)
+            self.add_module(f"input_proj_{i + 1}", proj)
             input_proj.append(proj)
             # norm layer
             if use_proj:
                 norm = nn.LayerNorm(dim)
             else:
                 norm = nn.Identity()
-            self.add_module("proj_norm_{}".format(i + 1), norm)
+            self.add_module(f"proj_norm_{i + 1}", norm)
             proj_norm.append(norm)
             # decoder layer
             decoder_layer = TPN_DecoderLayer(
                 d_model=dim, nhead=nhead, dim_feedforward=dim * 4
             )
             decoder = TPN_Decoder(decoder_layer, num_layers)
-            self.add_module("decoder_{}".format(i + 1), decoder)
+            self.add_module(f"decoder_{i + 1}", decoder)
             atm_decoders.append(decoder)
 
         self.input_proj = input_proj
@@ -319,9 +319,7 @@ class ATMHead(nn.Module):
             else:
                 outputs_seg_masks.append(
                     outputs_seg_masks[i_attn - 1]
-                    + F.interpolate(
-                        attn, size=size, mode="bilinear", align_corners=False
-                    )
+                    + F.interpolate(attn, size=size, mode="bilinear", align_corners=False)
                 )
 
         out["pred_masks"] = F.interpolate(
@@ -404,9 +402,7 @@ class ATMHead(nn.Module):
                     .permute(0, 1, 3, 2, 4)
                     .reshape(bs, h, w)
                 )
-            loss = self.loss_decode(
-                seg_logit, seg_label, ignore_index=self.ignore_index
-            )
+            loss = self.loss_decode(seg_logit, seg_label, ignore_index=self.ignore_index)
 
             # loss['acc_seg'] = accuracy(seg_logit["pred"], seg_label, ignore_index=self.ignore_index)
             return loss

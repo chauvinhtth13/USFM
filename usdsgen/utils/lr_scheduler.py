@@ -1,5 +1,4 @@
 from bisect import bisect_right
-from collections import Counter
 
 import torch
 from timm.scheduler import CosineLRScheduler, PlateauLRScheduler, StepLRScheduler
@@ -105,8 +104,7 @@ class LinearLRScheduler(Scheduler):
             t = t - self.warmup_t
             total_t = self.t_initial - self.warmup_t
             lrs = [
-                v - ((v - v * self.lr_min_rate) * (t / total_t))
-                for v in self.base_values
+                v - ((v - v * self.lr_min_rate) * (t / total_t)) for v in self.base_values
             ]
         return lrs
 

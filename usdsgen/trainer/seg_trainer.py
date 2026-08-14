@@ -1,21 +1,24 @@
 import datetime
 import glob
 import os
-import re
-import shutil
 import time
 
 import numpy as np
 import pandas as pd
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from timm.utils import AverageMeter
 from torchmetrics.segmentation import GeneralizedDiceScore, MeanIoU
 
-from usdsgen.utils.file_manager import Top_K_results_manager
+from usdsgen.data.datasets import SEG_NORM_MEAN, SEG_NORM_STD
+from usdsgen.utils.file_manager import EXPORT_DIRNAME, Top_K_results_manager
 from usdsgen.utils.metrics import get_seg_fromarray
-from usdsgen.utils.modelutils import get_grad_norm
+from usdsgen.utils.modelutils import (
+    get_grad_norm,
+    save_deploy_checkpoint,
+    save_pretrain_checkpoint,
+)
 
 from .basetrainer import BaseTrainer
 
@@ -59,7 +62,7 @@ def save_segmetrics(
     df_metrics.to_csv(os.path.join(output_path, "allsegmetrics.csv"), mode="a")
     if isbest:
         df_metrics.to_csv(os.path.join(mask_path_dir, "segmetrics.csv"))
-        # find the "best*.pth" and remove it
+        # chi giu MOT best*.pth: xoa ban cu truoc khi dat ten ban moi
         for bestpth in glob.glob(os.path.join(output_path, "best*.pth")):
             os.remove(bestpth)
         checkpoint_name = f"best{epoch}.pth"
@@ -71,17 +74,23 @@ class SegTrainer(BaseTrainer):
         # base setting
         super().__init__(config)
         self.max_dice = 0.0
-        # task specific setting
-        from omegaconf import OmegaConf as _OC
-
         self.state = {
             "model": self.model,
             "optimizer": self.optimizer,
             "lr_scheduler": self.lr_scheduler,  # object, xem ghi chu basetrainer
             "max_dice": self.max_dice,
             "epoch": self.epoch,
-            "config": _OC.to_container(self.config, resolve=True),
+            "config": OmegaConf.to_container(self.config, resolve=True),
         }
+
+        # Kien truc de nhung vao deploy/pretrain checkpoint. Bo `pretrained`:
+        # do la duong dan tuyet doi tren may train, mang ckpt di may khac thi
+        # tro vao file khong ton tai.
+        self.deploy_model_cfg = OmegaConf.to_container(
+            self.config.model.model_cfg, resolve=True
+        )
+        self.deploy_model_cfg.pop("pretrained", None)
+        self.deploy_model_cfg.get("backbone", {}).pop("pretrained", None)
         self.top_k_results_manager = Top_K_results_manager(mode="max", max_len=5)
         self.Dice = GeneralizedDiceScore(
             num_classes=self.config.data.num_classes,
@@ -151,12 +160,12 @@ class SegTrainer(BaseTrainer):
             self.fabric.log("lr", self.optimizer.param_groups[-1]["lr"], epoch)
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        self.logger.info("Training time {}".format(total_time_str))
+        self.logger.info(f"Training time {total_time_str}")
 
     def train_one_epoch(self, data_loader):
         self.model.train()
         self.logger.info(
-            f'Current learning rate for different parameter groups: {[it["lr"] for it in self.optimizer.param_groups]}'
+            f"Current learning rate for different parameter groups: {[it['lr'] for it in self.optimizer.param_groups]}"
         )
 
         num_steps = len(data_loader)
@@ -308,9 +317,15 @@ class SegTrainer(BaseTrainer):
             return loss, outputs, labels
 
     def save_checkpoint(self, epoch, max_dice, val_result, isbest=False):
-        # save result
+        """Ghi checkpoint. Moi lan train ket thuc se co ca `best` VA `last`.
+
+        Ban cu chi ghi `last` khi epoch cuoi KHONG phai epoch tot nhat, nen neu
+        model tot len den tan cuoi thi khong co file last nao ca.
+        """
+        is_last = epoch == self.config.train.epochs - 1
+
         with self.fabric.rank_zero_first():
-            checkpoint_name = None
+            best_name = None
             if isbest:
                 self.logger.info(
                     f"Saving the best model with dice {max_dice:.3f} at epoch {epoch}"
@@ -318,7 +333,7 @@ class SegTrainer(BaseTrainer):
                 mask_path_dir = save_seg_pre_gt(
                     self.config.output, val_result, epoch, max_dice
                 )
-                checkpoint_name = save_segmetrics(
+                best_name = save_segmetrics(
                     self.config.output,
                     val_result,
                     epoch,
@@ -328,19 +343,64 @@ class SegTrainer(BaseTrainer):
                 )
                 self.top_k_results_manager.update(mask_path_dir, max_dice)
 
-            if checkpoint_name is None and (epoch == self.config.train.epochs - 1):
-                checkpoint_name = f"last{epoch}.pth"
+        self.fabric.barrier()
+        best_name = self.fabric.broadcast(best_name, 0)
+
+        self.state.update({"epoch": epoch, "max_dice": max_dice})
+
+        # 1) checkpoint resume duoc (model + optimizer + scheduler)
+        if best_name is not None:
+            self.fabric.save(os.path.join(self.config.output, best_name), self.state)
+            self.logger.info(f"Succeed to save checkpoint to {best_name}")
+            self.export_checkpoints("best", epoch, max_dice, with_pretrain=False)
+
+        if is_last:
+            last_name = f"last{epoch}.pth"
+            self.fabric.save(os.path.join(self.config.output, last_name), self.state)
+            self.logger.info(f"Succeed to save checkpoint to {last_name}")
+            # 2) + 3) ban deploy va ban pretrain, chi o epoch cuoi
+            self.export_checkpoints("last", epoch, max_dice, with_pretrain=True)
 
         self.fabric.barrier()
-        self.fabric.broadcast(checkpoint_name, 0)
-        # best or save_freq or last epoch
-        if checkpoint_name is not None:
-            self.state.update({"epoch": epoch, "max_dice": max_dice})
-            self.fabric.save(
-                os.path.join(self.config.output, checkpoint_name), self.state
+
+    def export_checkpoints(self, kind, epoch, dice, with_pretrain=False):
+        """Xuat ban dung ngoai vao <output>/export/.
+
+        - `<kind>_deploy.pth`: kien truc + trong so + tham so tien xu ly ->
+          inference chi can load, khong viet lai model.
+        - `last_pretrain.pth`: rieng backbone, lam diem khoi dau cho lan
+          finetune sau (truyen qua model.model_cfg.backbone.pretrained=...).
+        """
+        if self.fabric.global_rank != 0:
+            return
+        export_dir = os.path.join(self.config.output, EXPORT_DIRNAME)
+        os.makedirs(export_dir, exist_ok=True)
+
+        meta = {
+            "epoch": epoch,
+            "dice": float(dice),
+            "img_size": int(self.config.data.img_size),
+            "num_classes": int(self.config.data.num_classes),
+            "norm_mean": list(SEG_NORM_MEAN),
+            "norm_std": list(SEG_NORM_STD),
+            "dataset": str(self.config.data.name),
+        }
+
+        deploy_path = os.path.join(export_dir, f"{kind}_deploy.pth")
+        save_deploy_checkpoint(
+            deploy_path, self.model, self.deploy_model_cfg, task="Seg", meta=meta
+        )
+        self.logger.info(f"Exported deploy checkpoint -> {deploy_path}")
+
+        if with_pretrain:
+            pretrain_path = os.path.join(export_dir, f"{kind}_pretrain.pth")
+            save_pretrain_checkpoint(
+                pretrain_path,
+                self.model,
+                self.deploy_model_cfg["backbone"],
+                meta=meta,
             )
-            self.logger.info(f"Succeed to save checkpoint to {checkpoint_name}")
-            self.fabric.barrier()
+            self.logger.info(f"Exported pretrain checkpoint -> {pretrain_path}")
 
 
 if __name__ == "__main__":

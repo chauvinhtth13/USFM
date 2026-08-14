@@ -1,9 +1,10 @@
 import os
-import re
 import shutil
 from glob import glob
 
-from typing_extensions import Literal
+# Thu muc chua checkpoint xuat ra de dung ngoai (deploy / pretrain).
+# Tach rieng vi day KHONG phai state day du cua Fabric -> khong resume duoc.
+EXPORT_DIRNAME = "export"
 
 
 class Top_K_results_manager:
@@ -32,6 +33,11 @@ class Top_K_results_manager:
 
 def auto_resume_helper(output_dir, logger):
     checkpoints = glob(os.path.join(output_dir, "**", "*.pth"), recursive=True)
+    # Bo qua export/: deploy va pretrain ckpt khong chua optimizer/scheduler,
+    # resume tu chung se im lang mat trang thai training.
+    checkpoints = [
+        c for c in checkpoints if EXPORT_DIRNAME not in os.path.normpath(c).split(os.sep)
+    ]
     logger.info(f"All checkpoints founded in {output_dir}: {checkpoints}")
     if len(checkpoints) > 0:
         latest_checkpoint = max(checkpoints, key=os.path.getmtime)

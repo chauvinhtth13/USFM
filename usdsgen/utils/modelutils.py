@@ -1,61 +1,22 @@
-import os
-
 import numpy as np
 import torch
-import torch.distributed as dist
-from scipy import interpolate
 from scipy.interpolate import RegularGridInterpolator as RGI
 
-
-def load_checkpoint(config, model, optimizer, lr_scheduler, logger, scaler):
-    logger.info(f">>>>>>>>>> Resuming from {config.MODEL.RESUME} ..........")
-    if config.MODEL.RESUME.startswith("https"):
-        checkpoint = torch.hub.load_state_dict_from_url(
-            config.MODEL.RESUME, map_location="cpu", check_hash=True
-        )
-    else:
-        checkpoint = torch.load(config.MODEL.RESUME, map_location="cpu")
-    msg = model.load_state_dict(checkpoint["model"], strict=False)
-    logger.info(msg)
-    max_accuracy = 0.0
-    if (
-        not config.EVAL_MODE
-        and "optimizer" in checkpoint
-        and "lr_scheduler" in checkpoint
-        and "epoch" in checkpoint
-    ):
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-        scaler.load_state_dict(checkpoint["scaler"])
-        config.TRAIN.START_EPOCH = checkpoint["epoch"] + 1
-        logger.info(
-            f"=> loaded successfully '{config.MODEL.RESUME}' (epoch {checkpoint['epoch']})"
-        )
-        if "max_accuracy" in checkpoint:
-            max_accuracy = checkpoint["max_accuracy"]
-
-    del checkpoint
-    torch.cuda.empty_cache()
-    return max_accuracy
+# Dinh danh format cua deploy/pretrain checkpoint. Tang so khi doi cau truc dict.
+DEPLOY_FORMAT = "usdsgen-deploy-v1"
+PRETRAIN_FORMAT = "usdsgen-pretrain-v1"
 
 
-def save_checkpoint(
-    config, epoch, model, max_accuracy, optimizer, lr_scheduler, logger, scaler, tag=""
-):
-    save_state = {
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "lr_scheduler": lr_scheduler.state_dict(),
-        "max_accuracy": max_accuracy,
-        "scaler": scaler.state_dict(),
-        "epoch": epoch,
-        "config": config,
-    }
+def unwrap_model(model):
+    """Boc cac lop wrapper (Fabric _FabricModule, DDP) de lay nn.Module goc.
 
-    save_path = os.path.join(config.OUTPUT, f"{tag}ckpt_epoch_{epoch}.pth")
-    logger.info(f"{save_path} saving......")
-    torch.save(save_state, save_path)
-    logger.info(f"{save_path} saved !!!")
+    Fabric boc model thanh _FabricModule; voi DDP con them mot lop nua. Peel
+    `.module` cho den khi het thi duoc module that su giu state_dict "sach"
+    (backbone.* / decode_head.*), khop voi cai build_seg_model tao ra.
+    """
+    while hasattr(model, "module"):
+        model = model.module
+    return model
 
 
 def get_grad_norm(parameters, norm_type=2):
@@ -71,40 +32,94 @@ def get_grad_norm(parameters, norm_type=2):
     return total_norm
 
 
-def reduce_tensor(tensor):
-    rt = tensor.clone()
-    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
-    rt /= dist.get_world_size()
-    return rt
+# --------------------------------------------------------------------------- #
+# Export checkpoint
+# --------------------------------------------------------------------------- #
+def save_deploy_checkpoint(path, model, model_cfg, task, meta=None):
+    """Checkpoint tu chua kien truc: inference chi can load, khong viet model.
+
+    Luu `model_cfg` (dict thuan) canh `state_dict`, nen ben load co the dung
+    build_seg_model dung lai kien truc y het luc train. Kem theo tham so tien
+    xu ly (img_size / mean / std) — day moi la thu hay lam sai ket qua inference
+    ma khong bao loi.
+
+    Toan bo gia tri la kieu co ban + tensor nen `torch.load(weights_only=True)`
+    doc duoc, khong can tin tuong file pickle.
+    """
+    ckpt = {
+        "format": DEPLOY_FORMAT,
+        "task": task,
+        "model_cfg": model_cfg,
+        "state_dict": unwrap_model(model).state_dict(),
+        **(meta or {}),
+    }
+    torch.save(ckpt, path)
+    return path
 
 
-def load_pretrained(model_cfg, model, logger):
-    logger.info(f">>>>>>>>>> Fine-tuned from {model_cfg.pretrained} ..........")
-    # torch >= 2.6: weights_only=True la default; khai tuong minh cho ro rang.
-    checkpoint = torch.load(
-        model_cfg.pretrained, map_location="cpu", weights_only=True
-    )
-    checkpoint_model = checkpoint.get("model", checkpoint) if isinstance(
-        checkpoint, dict
-    ) else checkpoint
+# Cac tien to thuoc ve dau ra cua tac vu, khong phai bieu dien dung chung.
+# Bo di khi xuat pretrain: chung gan chat voi num_classes cua tac vu cu.
+_TASK_HEAD_PREFIXES = ("decode_head.", "auxiliary_head.", "head.", "fc_norm.")
 
-    if "swin" in model_cfg.type.lower():
-        logger.info(">>>>>>>>>> Remapping pre-trained keys for SWIN ..........")
-        checkpoint_model = remap_pretrained_keys_swin(model, checkpoint_model, logger)
-    elif "vit" in model_cfg.type.lower():
-        logger.info(">>>>>>>>>> Remapping pre-trained keys for VIT ..........")
-        checkpoint_model = remap_pretrained_keys_vit(model, checkpoint_model, logger)
+
+def save_pretrain_checkpoint(path, model, backbone_cfg, meta=None):
+    """Chi phan backbone, dung lam trong so khoi tao cho lan finetune sau.
+
+    Format `{"model": ...}` khop voi cai `load_pretrained` doc, nen dung duoc
+    truc tiep qua `model.model_cfg.backbone.pretrained=<file>`.
+
+    - Model Seg (SegModel): lay thang thuoc tinh `.backbone`.
+    - Model Cls (VisionTransformer): khong co `.backbone`, nen loc bo cac key
+      thuoc classifier head.
+    """
+    inner = unwrap_model(model)
+    backbone = getattr(inner, "backbone", None)
+    if backbone is not None:
+        state = backbone.state_dict()
     else:
-        raise NotImplementedError
+        state = {
+            k: v
+            for k, v in inner.state_dict().items()
+            if not k.startswith(_TASK_HEAD_PREFIXES)
+        }
+
+    ckpt = {
+        "format": PRETRAIN_FORMAT,
+        "model": state,
+        "model_cfg": backbone_cfg,
+        **(meta or {}),
+    }
+    torch.save(ckpt, path)
+    return path
+
+
+# --------------------------------------------------------------------------- #
+# Load pretrained
+# --------------------------------------------------------------------------- #
+def load_pretrained(model_cfg, model, logger):
+    def log(msg):
+        if logger is not None:
+            logger.info(msg)
+
+    log(f">>>>>>>>>> Fine-tuned from {model_cfg.pretrained} ..........")
+    # torch >= 2.6: weights_only=True la default; khai tuong minh cho ro rang.
+    checkpoint = torch.load(model_cfg.pretrained, map_location="cpu", weights_only=True)
+    checkpoint_model = (
+        checkpoint.get("model", checkpoint)
+        if isinstance(checkpoint, dict)
+        else checkpoint
+    )
+
+    checkpoint_model = remap_pretrained_keys_vit(model, checkpoint_model, logger)
 
     msg = model.load_state_dict(checkpoint_model, strict=False)
     missing = [k for k in msg.missing_keys if "relative_position_index" not in k]
     unexpected = list(msg.unexpected_keys)
     n_model = len(model.state_dict())
     n_loaded = n_model - len(missing)
-    logger.info(f"Missing keys ({len(missing)}): {missing}")
-    logger.info(f"Unexpected keys ({len(unexpected)}): {unexpected}")
-    logger.info(f"Loaded {n_loaded}/{n_model} tensors from pretrained")
+    log(f"Missing keys ({len(missing)}): {missing}")
+    log(f"Unexpected keys ({len(unexpected)}): {unexpected}")
+    log(f"Loaded {n_loaded}/{n_model} tensors from pretrained")
     if len(missing) > 10 or len(unexpected) > 10:
         raise RuntimeError(
             f"Pretrained load looks broken: {len(missing)} missing, "
@@ -114,122 +129,27 @@ def load_pretrained(model_cfg, model, logger):
         )
 
     del checkpoint_model
-    torch.cuda.empty_cache()
-    logger.info(f">>>>>>>>>> loaded successfully '{model_cfg.pretrained}'")
-
-
-def remap_pretrained_keys_swin(model, checkpoint_model, logger):
-    state_dict = model.state_dict()
-
-    # Geometric interpolation when pre-trained patch size mismatch with fine-tuned patch size
-    all_keys = list(checkpoint_model.keys())
-    for key in all_keys:
-        if "relative_position_bias_table" in key:
-            relative_position_bias_table_pretrained = checkpoint_model[key]
-            relative_position_bias_table_current = state_dict[key]
-            L1, nH1 = relative_position_bias_table_pretrained.size()
-            L2, nH2 = relative_position_bias_table_current.size()
-            if nH1 != nH2:
-                logger.info(f"Error in loading {key}, passing......")
-            else:
-                if L1 != L2:
-                    logger.info(
-                        f"{key}: Interpolate relative_position_bias_table using geo."
-                    )
-                    src_size = int(L1**0.5)
-                    dst_size = int(L2**0.5)
-
-                    def geometric_progression(a, r, n):
-                        return a * (1.0 - r**n) / (1.0 - r)
-
-                    left, right = 1.01, 1.5
-                    while right - left > 1e-6:
-                        q = (left + right) / 2.0
-                        gp = geometric_progression(1, q, src_size // 2)
-                        if gp > dst_size // 2:
-                            right = q
-                        else:
-                            left = q
-
-                    # if q > 1.090307:
-                    #     q = 1.090307
-
-                    dis = []
-                    cur = 1
-                    for i in range(src_size // 2):
-                        dis.append(cur)
-                        cur += q ** (i + 1)
-
-                    r_ids = [-_ for _ in reversed(dis)]
-
-                    x = r_ids + [0] + dis
-                    y = r_ids + [0] + dis
-
-                    t = dst_size // 2.0
-                    dx = np.arange(-t, t + 0.1, 1.0)
-                    dy = np.arange(-t, t + 0.1, 1.0)
-
-                    logger.info("Original positions = %s" % str(x))
-                    logger.info("Target positions = %s" % str(dx))
-
-                    all_rel_pos_bias = []
-
-                    for i in range(nH1):
-                        z = (
-                            relative_position_bias_table_pretrained[:, i]
-                            .view(src_size, src_size)
-                            .float()
-                            .numpy()
-                        )
-                        f_cubic = interpolate.interp2d(x, y, z, kind="cubic")
-                        all_rel_pos_bias.append(
-                            torch.Tensor(f_cubic(dx, dy))
-                            .contiguous()
-                            .view(-1, 1)
-                            .to(relative_position_bias_table_pretrained.device)
-                        )
-
-                    new_rel_pos_bias = torch.cat(all_rel_pos_bias, dim=-1)
-                    checkpoint_model[key] = new_rel_pos_bias
-
-    # delete relative_position_index since we always re-init it
-    relative_position_index_keys = [
-        k for k in checkpoint_model.keys() if "relative_position_index" in k
-    ]
-    for k in relative_position_index_keys:
-        del checkpoint_model[k]
-
-    # delete relative_coords_table since we always re-init it
-    relative_coords_table_keys = [
-        k for k in checkpoint_model.keys() if "relative_coords_table" in k
-    ]
-    for k in relative_coords_table_keys:
-        del checkpoint_model[k]
-
-    # delete attn_mask since we always re-init it
-    attn_mask_keys = [k for k in checkpoint_model.keys() if "attn_mask" in k]
-    for k in attn_mask_keys:
-        del checkpoint_model[k]
-
-    return checkpoint_model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    log(f">>>>>>>>>> loaded successfully '{model_cfg.pretrained}'")
 
 
 def remap_pretrained_keys_vit(model, checkpoint_model, logger):
-    # Duplicate shared rel_pos_bias to each layer
-    if (
-        getattr(model, "use_rel_pos_bias", False)
-        and "rel_pos_bias.relative_position_bias_table" in checkpoint_model
-    ):
-        logger.info(
-            "Expand the shared relative position embedding to each transformer block."
-        )
-    num_layers = model.get_num_layers()
-    rel_pos_bias = checkpoint_model["rel_pos_bias.relative_position_bias_table"]
-    for i in range(num_layers):
-        checkpoint_model["blocks.%d.attn.relative_position_bias_table" % i] = (
-            rel_pos_bias.clone()
-        )
-    checkpoint_model.pop("rel_pos_bias.relative_position_bias_table")
+    def log(msg):
+        if logger is not None:
+            logger.info(msg)
+
+    # Checkpoint pre-train goc giu MOT bang rel_pos_bias dung chung; model
+    # finetune giu rieng tung block. Checkpoint xuat ra tu mot lan finetune
+    # (pretrain_*.pth) da o dang per-block roi -> khong co key nay, bo qua.
+    shared_key = "rel_pos_bias.relative_position_bias_table"
+    if shared_key in checkpoint_model:
+        log("Expand the shared relative position embedding to each transformer block.")
+        rel_pos_bias = checkpoint_model.pop(shared_key)
+        for i in range(model.get_num_layers()):
+            checkpoint_model[f"blocks.{i}.attn.relative_position_bias_table"] = (
+                rel_pos_bias.clone()
+            )
 
     # Geometric interpolation when pre-trained patch size mismatch with fine-tuned patch size
     all_keys = list(checkpoint_model.keys())
@@ -250,7 +170,7 @@ def remap_pretrained_keys_vit(model, checkpoint_model, logger):
             src_size = int((src_num_pos - num_extra_tokens) ** 0.5)
             dst_size = int((dst_num_pos - num_extra_tokens) ** 0.5)
             if src_size != dst_size:
-                logger.info(
+                log(
                     "Position interpolate for %s from %dx%d to %dx%d"
                     % (key, src_size, src_size, dst_size, dst_size)
                 )
@@ -269,9 +189,6 @@ def remap_pretrained_keys_vit(model, checkpoint_model, logger):
                     else:
                         left = q
 
-                # if q > 1.090307:
-                #     q = 1.090307
-
                 dis = []
                 cur = 1
                 for i in range(src_size // 2):
@@ -287,9 +204,6 @@ def remap_pretrained_keys_vit(model, checkpoint_model, logger):
                 dx = np.arange(-t, t + 0.1, 1.0)
                 dy = np.arange(-t, t + 0.1, 1.0)
 
-                # logger.info("Original positions = %s" % str(x))
-                # logger.info("Target positions = %s" % str(dx))
-
                 all_rel_pos_bias = []
 
                 xi, yi = np.meshgrid(dx, dy, indexing="ij")
@@ -298,7 +212,6 @@ def remap_pretrained_keys_vit(model, checkpoint_model, logger):
                 for i in range(num_attn_heads):
                     z = rel_pos_bias[:, i].view(src_size, src_size).float().numpy()
                     f = RGI((x, y), z.T, method="cubic", bounds_error=False)
-                    # 进行插值
                     all_rel_pos_bias.append(
                         torch.Tensor(f(points).reshape(xi.shape))
                         .contiguous()

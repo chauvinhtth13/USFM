@@ -2,7 +2,7 @@
 defaults:
   - baseconfig
   - _self_
-  - /data: Seg/FASS
+  - /data: Seg/toy_dataset
   - /model: Seg/SegVit
   - /train: null
 

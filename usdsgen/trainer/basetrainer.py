@@ -111,9 +111,7 @@ class BaseTrainer:
 
     def make_model(self):
         self.model = build_model(self.config, self.logger)
-        n_parameters = sum(
-            p.numel() for p in self.model.parameters() if p.requires_grad
-        )
+        n_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         self.logger.info(
             f"Creating model:{self.config.model.model_name}/{OmegaConf.to_container(self.config.model.model_cfg, resolve=True)} for task: {self.config.task}"
         )

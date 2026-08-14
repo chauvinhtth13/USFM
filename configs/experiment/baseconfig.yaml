@@ -22,8 +22,9 @@ train:
   clip_grad: 5.0
   auto_resume: true
   compile: false
-  accumulation_steps: 0
-  use_checkpoint: false
+  accumulation_steps: 1 # 1 = khong tich luy. KHONG dat 0: cls_trainer chia modulo cho no.
+  # (gradient checkpointing nam o model.model_cfg.backbone.use_checkpoint —
+  #  khoa train.use_checkpoint cu khong duoc doc o dau ca nen da bo)
   layer_decay: 1.0
   val_freq: 1
   only_resume_model: false

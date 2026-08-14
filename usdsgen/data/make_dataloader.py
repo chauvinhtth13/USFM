@@ -1,5 +1,4 @@
-import torchvision.transforms as T
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 from .datasets import build_cls_dataset, build_seg_dataset
 

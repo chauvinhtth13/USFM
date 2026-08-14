@@ -7,7 +7,7 @@ import pandas as pd
 from termcolor import colored
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def create_logger(output_dir, dist_rank=0, name=None):
     # create logger
     logger = logging.getLogger(name)
