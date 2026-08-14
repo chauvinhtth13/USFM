@@ -108,7 +108,7 @@ def build_seg_dataset(config, logger):
 
 
 class SegBaseDataset(Dataset):
-    def __init__(self, DataConfig, stage, transforms=None):
+    def __init__(self, DataConfig, stage, transforms):
         super().__init__()
         data_folder = os.path.join(DataConfig.path.root, DataConfig.path.split[stage])
         self.num_classes = DataConfig.num_classes
@@ -120,27 +120,26 @@ class SegBaseDataset(Dataset):
         mask_file = self.mask_list[index]
         image = np.array(Image.open(image_file).convert("RGB"))
         if self.num_classes == 2:
-            mask = np.array(Image.open(mask_file).convert("1")).astype(int)
+            # KHONG dung convert("1"): no nguong o 128 va bat dither, nen mask
+            # luu duoi dang nhan 0/1 se ra RONG HOAN TOAN — khong exception,
+            # chi la Dice ~ 0. convert("L") + > 0 dung cho ca 0/1 va 0/255.
+            mask = (np.array(Image.open(mask_file).convert("L")) > 0).astype(int)
         else:
             mask = np.array(Image.open(mask_file)).astype(int)
-        if self.transforms is not None:
-            image_mask = self.transforms(image=image, mask=mask)
-            image_mask["img_path"] = image_file
-            image_mask["mask_path"] = mask_file
+        image_mask = self.transforms(image=image, mask=mask)
+        image_mask["img_path"] = image_file
+        image_mask["mask_path"] = mask_file
         return image_mask
 
     def update_datalist(self, folder):
         image_path = os.path.join(folder, "image")
         mask_path = os.path.join(folder, "mask")
-        # find all file in the folder and subfolder
-        filenames = []
-        for root, dirs, files in os.walk(image_path):
-            for file in files:
-                filenames.append(os.path.join(root, file))
-
-        # filenames = os.listdir(image_path)
-        self.image_list = filenames
-        self.mask_list = [i.replace(image_path, mask_path) for i in filenames]
+        # sorted: os.walk tra ve theo thu tu filesystem, doi theo may. Val/test
+        # khong shuffle nen thu tu do chay thang vao thu tu dong segmetrics.csv.
+        self.image_list = sorted(
+            os.path.join(root, f) for root, _, files in os.walk(image_path) for f in files
+        )
+        self.mask_list = [i.replace(image_path, mask_path) for i in self.image_list]
 
     def __len__(self):
         return len(self.image_list)

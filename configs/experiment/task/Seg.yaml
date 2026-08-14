@@ -12,7 +12,6 @@ data:
   batch_size: 64
   pin_memory: true
   num_workers: 8
-  train_ratio: 1.0
 
 model:
   num_classes: ${data.num_classes}

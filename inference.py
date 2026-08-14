@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+from omegaconf import OmegaConf
 from PIL import Image, ImageDraw, ImageFont
 
 from usdsgen.models.build import build_seg_model, load_deploy_checkpoint
@@ -55,44 +56,20 @@ CLR_FN = (70, 140, 255)  # xanh duong — bo sot
 # --------------------------------------------------------------------------- #
 # Model
 # --------------------------------------------------------------------------- #
+SEGVIT_CFG = Path(__file__).resolve().parent / "configs" / "model" / "Seg" / "SegVit.yaml"
+
+
 def default_model_cfg(img_size: int, num_classes: int) -> dict:
-    """Khop configs/model/Seg/SegVit.yaml (da bat qkv_bias / init_values)."""
-    return {
-        "backbone": {
-            "type": "HVITBackbone4Seg",
-            "pretrained": None,  # trong so lay tu checkpoint fine-tune
-            "img_size": img_size,
-            "patch_size": 16,
-            "embed_dim": 768,
-            "depth": 12,
-            "num_heads": 12,
-            "drop_path_rate": 0.0,  # inference: tat drop path
-            "attn_drop_rate": 0.0,
-            "drop_rate": 0.0,
-            "out_indices": [5, 7, 11],
-            "use_abs_pos_emb": False,
-            "use_rel_pos_bias": True,
-            "qkv_bias": True,
-            "init_values": 0.1,
-        },
-        "decode_head": {
-            "type": "ATMHead",
-            "img_size": img_size,
-            "in_channels": 768,
-            "channels": 768,
-            "num_classes": num_classes,
-            "num_layers": 3,
-            "num_heads": 12,
-            "use_stages": 3,
-            "embed_dims": 384,
-            "loss_decode": {
-                "type": "ATMLoss",
-                "num_classes": num_classes,
-                "dec_layers": 3,
-                "loss_weight": 1.0,
-            },
-        },
-    }
+    """Doc thang configs/model/Seg/SegVit.yaml thay vi chep tay kien truc lan 2.
+
+    Chi dung cho checkpoint train thuong. Deploy checkpoint tu mang model_cfg
+    nen khong bao gio cham ham nay.
+    """
+    cfg = OmegaConf.load(SEGVIT_CFG)
+    cfg.data = {"img_size": img_size, "num_classes": num_classes}  # giai ${data.*}
+    model_cfg = OmegaConf.to_container(cfg.model.model_cfg, resolve=True)
+    model_cfg["backbone"]["drop_path_rate"] = 0.0  # inference: tat drop path
+    return model_cfg
 
 
 def extract_state_dict(ckpt) -> dict:
@@ -448,7 +425,8 @@ def main():
             gt_path = find_gt(path, args.mask_dir)
             gt = None
             if gt_path is not None:
-                gt = np.asarray(Image.open(gt_path).convert("1")).astype(np.uint8)
+                # convert("L") + > 0, khong phai convert("1") — xem SegBaseDataset
+                gt = (np.asarray(Image.open(gt_path).convert("L")) > 0).astype(np.uint8)
                 if gt.shape != pred.shape:
                     print(f"[canh bao] GT lech kich thuoc, bo qua: {gt_path.name}")
                     gt = None

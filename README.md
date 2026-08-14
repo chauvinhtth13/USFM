@@ -19,13 +19,13 @@ a current Python and PyTorch stack and extended for standalone inference.
 
 The upstream project depends on `mmcv` and `mmsegmentation`, neither of which ship
 wheels for Python 3.12+. Both have been removed: the model is now assembled from plain
-`nn.Module` containers, which unblocks PyTorch 2.13 on Python 3.14 and removes the
+`nn.Module` containers, which unblocks PyTorch 2.13 on Python 3.12+ and removes the
 transitive `openxlab`/`oss2` dependency chain that pinned `requests==2.28.2`.
 
 | | Upstream | This fork |
 |---|---|---|
 | `mmcv` / `mmsegmentation` | Required | **Removed** |
-| Python | 3.9 | **3.12+** (running 3.14) |
+| Python | 3.9 | **3.12+** (CI: 3.12, 3.13) |
 | PyTorch | 2.4.1 | **2.13** |
 | Model assembly | `mmseg` registry (`EncoderDecoder`) | Plain `nn.Module` — [`usdsgen/models/build.py`](usdsgen/models/build.py) |
 | Attention | Explicit matmul + softmax | `F.scaled_dot_product_attention` (Flash / mem-efficient) |
@@ -39,10 +39,14 @@ Weights from upstream remain fully compatible: the refactor preserves every
 
 ## Contents
 
-1. [Installation](#1-installation) · 2. [Pretrained weights](#2-pretrained-weights) ·
-3. [Dataset layout](#3-dataset-layout) · 4. [Training](#4-training) ·
-5. [Checkpoint artifacts](#5-checkpoint-artifacts) · 6. [Inference](#6-inference) ·
-7. [Repository layout](#7-repository-layout) · 8. [Known limitations](#8-known-limitations)
+[1. Installation](#1-installation) ·
+[2. Pretrained weights](#2-pretrained-weights) ·
+[3. Dataset layout](#3-dataset-layout) ·
+[4. Training](#4-training) ·
+[5. Checkpoint artifacts](#5-checkpoint-artifacts) ·
+[6. Inference](#6-inference) ·
+[7. Repository layout](#7-repository-layout) ·
+[8. Known limitations](#8-known-limitations)
 
 ---
 
@@ -91,12 +95,17 @@ datasets/Seg/<dataset_name>/
     └── mask/
 ```
 
-Masks are single-channel images where `0` is background and non-zero is foreground.
-Each mask filename must match its corresponding image filename.
+Masks are single-channel images where `0` is background and non-zero is foreground —
+both `0/1` label maps and `0/255` images work. Each mask filename must match its
+corresponding image filename.
 
 Register the dataset in `configs/data/Seg/<name>.yaml`; use
 [`muscle.yaml`](configs/data/Seg/muscle.yaml) as a template. Paths resolve against
 `data.dataset_path` (default `./datasets/`), so configs stay portable across machines.
+
+`<dataset_name>` is whatever `path.root` points at, which need not match the config
+filename: `muscle.yaml` reads from `datasets/Seg/muscle_subj/`, a subject-wise split
+in which no subject appears in more than one of train / val / test.
 
 A small dataset for smoke-testing the pipeline is available as
 [`Seg_toy_dataset.tar.gz`](https://drive.google.com/file/d/1E3e7mTBdIxj4UOfeUrEFM6GgryXylodG/view)
@@ -188,7 +197,7 @@ previous task.
 ```bash
 python inference.py \
     --ckpt logs/.../export/best_deploy.pth \
-    --input datasets/Seg/muscle/test_set/image \
+    --input datasets/Seg/muscle_subj/test_set/image \
     --output inference_out
 ```
 
@@ -250,7 +259,8 @@ graph TD;
   ([`segbackbone.py`](usdsgen/modules/backbone/segbackbone.py)). This is correct under
   DDP and falls back to standard behaviour on a single device, but it is not
   configurable and can cause graph breaks under `torch.compile`.
-- **No automated test suite.** CI runs import and forward-pass smoke tests only.
+- **No automated test suite.** CI runs a forward-pass smoke test and
+  [`test_dataset.py`](test_dataset.py) (binary-mask reading and file ordering) only.
 
 ## License and citation
 

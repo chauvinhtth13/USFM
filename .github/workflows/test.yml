@@ -51,3 +51,6 @@ jobs:
           assert out['pred'].shape == (1, 2, 64, 64), out['pred'].shape
           print('ok', out['pred'].shape)
           "
+
+      - name: Dataset self-check
+        run: python test_dataset.py

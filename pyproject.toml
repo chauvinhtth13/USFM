@@ -28,6 +28,7 @@ dependencies = [
     "hydra-colorlog",
     "omegaconf>=2.3",
     "tensorboard",
+    "termcolor",           # utils/logger.py: mau cho log console
     "opencv-python-headless",
 ]
 
