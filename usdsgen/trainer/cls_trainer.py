@@ -125,11 +125,16 @@ class ClsTrainer(BaseTrainer):
             # Tich luy gradient: step sau moi `accum` micro-batch.
             # Ban cu dung `idx % accum != 0` -> step ngay tai idx=0 (chua tich
             # luy gi) va crash ZeroDivisionError khi accum=0.
-            is_accumulating = (idx + 1) % accum != 0
+            # idx+1 == num_steps: epoch chia khong het accum thi vai micro-batch
+            # cuoi phai duoc step, khong thi gradient treo lai sang epoch sau.
+            is_accumulating = (idx + 1) % accum != 0 and (idx + 1) != num_steps
             with self.fabric.no_backward_sync(self.model, enabled=is_accumulating):
                 loss = self.criterion(outputs, labels)
-                # .backward() accumulates when .zero_grad() wasn't called
-                self.fabric.backward(loss)
+                # .backward() accumulates when .zero_grad() wasn't called.
+                # Chia accum: khong chia thi gradient la TONG chu khong phai
+                # trung binh, cong them LR da x accum o make_optimizer thanh ra
+                # buoc cap nhat lech accum^2 lan.
+                self.fabric.backward(loss / accum)
 
             if not is_accumulating:
                 if self.config.train.clip_grad:

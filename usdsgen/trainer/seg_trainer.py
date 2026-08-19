@@ -177,22 +177,38 @@ class SegTrainer(BaseTrainer):
 
         start = time.time()
         end = time.time()
+        accum = max(1, int(self.config.train.accumulation_steps))
         for idx, batch in enumerate(data_loader):
             loss, outputs, labels = self.step(batch)
-            self.fabric.backward(loss)
-            if self.config.train.clip_grad:
-                grad_norm = self.fabric.clip_gradients(
-                    self.model,
-                    self.optimizer,
-                    max_norm=self.config.train.clip_grad,
-                    error_if_nonfinite=False,
-                )
-            else:
-                grad_norm = get_grad_norm(self.model.parameters())
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-            self.lr_scheduler.step_update(self.epoch * num_steps + idx)
-            norm_meter.update(grad_norm)
+
+            # Tich luy gradient: step sau moi `accum` micro-batch. Truoc day
+            # vong lap step MOI batch trong khi basetrainer.make_optimizer van
+            # nhan LR len accum lan -> dat accumulation_steps>1 chi lam LR sai.
+            # Dieu kien idx+1 == num_steps: epoch chia khong het accum thi vai
+            # micro-batch cuoi phai duoc step, khong thi gradient cua chung
+            # treo lai sang epoch sau (zero_grad khong bao gio duoc goi).
+            is_accumulating = (idx + 1) % accum != 0 and (idx + 1) != num_steps
+            with self.fabric.no_backward_sync(self.model, enabled=is_accumulating):
+                # Chia accum: khong chia thi gradient la TONG chu khong phai
+                # trung binh, cong them LR da x accum thanh ra buoc cap nhat
+                # lech accum^2 lan.
+                self.fabric.backward(loss / accum)
+
+            if not is_accumulating:
+                if self.config.train.clip_grad:
+                    grad_norm = self.fabric.clip_gradients(
+                        self.model,
+                        self.optimizer,
+                        max_norm=self.config.train.clip_grad,
+                        error_if_nonfinite=False,
+                    )
+                else:
+                    grad_norm = get_grad_norm(self.model.parameters())
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                self.lr_scheduler.step_update(self.epoch * num_steps + idx)
+                norm_meter.update(grad_norm)
+
             loss_meter.update(loss.item(), labels.size(0))
             outputs = outputs.argmax(dim=1)
             dice_meter.update(self.Dice(outputs, labels).item())
