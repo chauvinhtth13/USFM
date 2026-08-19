@@ -1,13 +1,26 @@
-"""Self-check cho gradient accumulation. Chay: python test_accum.py
+"""Self-check cho SegTrainer. Chay: python test_trainer.py
 
-Soi hai cho de sai am tham trong vong lap train_one_epoch:
+Soi ba cho de sai am tham trong train_one_epoch / validate:
 1. loss PHAI chia accum — khong chia thi gradient la tong chu khong phai trung
    binh, cong voi LR da x accum o basetrainer.make_optimizer -> lech accum^2.
 2. micro-batch cuoi cua epoch chia khong het accum PHAI duoc step, khong thi
    gradient cua chung treo sang epoch sau (zero_grad khong duoc goi).
+3. validate() luu mask duoi dang uint8 de khong OOM — metric phai ra so y het
+   nhu khi luu int64.
 """
 
+import sys
+import types
+
 import torch
+
+# metrics.py chi dung monai cho HD95; dice/iou la torch thuan. Stub de self-check
+# chay duoc o may chua cai monai.
+sys.modules.setdefault("monai", types.ModuleType("monai"))
+sys.modules.setdefault("monai.metrics", types.ModuleType("monai.metrics"))
+sys.modules["monai.metrics"].compute_hausdorff_distance = None
+
+from usdsgen.utils.metrics import dice_coefficient, sespiou_coefficient2  # noqa: E402
 
 
 def step_indices(num_steps: int, accum: int) -> list[int]:
@@ -45,6 +58,18 @@ def main() -> None:
 
     assert torch.allclose(w_full.grad, w_accum.grad, atol=1e-6), (
         f"lech: {w_full.grad.flatten()} vs {w_accum.grad.flatten()}"
+    )
+
+    # uint8 khong lam doi metric: mask la chi so lop, moi ham metric deu
+    # nhi phan hoa bang `>= 1` truoc khi tinh.
+    gt = (torch.rand(4, 16, 16) > 0.5).long()
+    pred = (torch.rand(4, 16, 16) > 0.5).long()
+    assert torch.equal(gt.to(torch.uint8).long(), gt), "uint8 lam mat gia tri mask"
+    assert dice_coefficient(pred, gt) == dice_coefficient(
+        pred.to(torch.uint8), gt.to(torch.uint8)
+    )
+    assert sespiou_coefficient2(pred, gt) == sespiou_coefficient2(
+        pred.to(torch.uint8), gt.to(torch.uint8)
     )
 
     print("ok")

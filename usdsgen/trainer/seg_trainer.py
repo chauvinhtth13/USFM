@@ -246,8 +246,15 @@ class SegTrainer(BaseTrainer):
         end = time.time()
         for idx, batch in enumerate(data_loader):
             loss, outputs, labels = self.step(batch)
-            mask_gt.append(labels)
-            mask_pre.append(outputs.argmax(dim=1))
+            # uint8 chu khong phai int64 mac dinh: mask chi la chi so lop nen
+            # int64 ton gap 8 lan vo ich. Voi 1217 anh val o 768px, int64 =
+            # 5.7GB MOI tensor, va luc torch.cat thi list cu + tensor moi cung
+            # ton tai -> OOM. uint8 dua con so nay ve ~717MB.
+            # ponytail: van giu toan bo mask tren GPU (save_seg_pre_gt can ca
+            # bo). Val set rat lon hoac >255 lop thi phai doi sang tinh metric
+            # tung batch va chi giu diem so.
+            mask_gt.append(labels.to(torch.uint8))
+            mask_pre.append(outputs.argmax(dim=1).to(torch.uint8))
             mask_path.append(batch["mask_path"])
             loss_meter.update(loss.item(), labels.size(0))
             batch_time.update(time.time() - end)
