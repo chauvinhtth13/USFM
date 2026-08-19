@@ -68,6 +68,20 @@ def build_model(config, logger):
             model = build_vit(config.model.model_cfg, logger)
         elif config.task == "Seg":
             model_cfg = OmegaConf.to_container(config.model.model_cfg, resolve=True)
+            # backbone.img_size / decode_head.img_size mac dinh noi voi
+            # data.img_size qua interpolation. Ghi de mot ben roi quen ben kia
+            # thi model van dung duoc, chi la bang rel_pos_bias sai kich thuoc
+            # -> no o tan trong SDPA sau ~30s setup voi loi kieu "expanded size
+            # of the tensor (1601) must match the existing size (2305)".
+            for part in ("backbone", "decode_head"):
+                got = model_cfg.get(part, {}).get("img_size")
+                if got is not None and got != config.data.img_size:
+                    raise ValueError(
+                        f"model_cfg.{part}.img_size={got} khac "
+                        f"data.img_size={config.data.img_size}. Hai khoa nay "
+                        "mac dinh bam theo data.img_size — bo override thua di, "
+                        "chi dat data.img_size la du."
+                    )
             model = build_seg_model(model_cfg, logger)
             if config.model.model_cfg.backbone.pretrained:
                 load_pretrained(config.model.model_cfg.backbone, model.backbone, logger)
