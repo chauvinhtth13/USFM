@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torchvision.transforms as T
 from albumentations.pytorch import ToTensorV2
+from omegaconf import OmegaConf
 from PIL import Image
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.data.transforms import str_to_pil_interp
@@ -70,14 +71,25 @@ def build_cls_dataset(config, logger):
     return dataset_train, dataset_val, dataset_test
 
 
+def build_aug(aug_cfg):
+    """Dung list augmentation tu config: [{name: HorizontalFlip, p: 0.5}, ...].
+
+    `name` la ten class trong albumentations, cac khoa con lai la kwargs.
+    to_container: kwargs dang list (vd brightness_limit) phai la list python
+    thuan, ListConfig lot vao albumentations la kieu loi kho doc.
+    """
+    out = []
+    for a in OmegaConf.to_container(OmegaConf.create(aug_cfg), resolve=True) or []:
+        kwargs = dict(a)
+        out.append(getattr(A, kwargs.pop("name"))(**kwargs))
+    return out
+
+
 def build_seg_dataset(config, logger):
     train_transforms = A.Compose(
         [
             A.Resize(width=config.data.img_size, height=config.data.img_size),
-            A.RandomRotate90(p=0.5),
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),
-            # A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.5),
+            *build_aug((config.get("aug") or {}).get("train")),
             A.ToFloat(max_value=255),
             A.Normalize(mean=SEG_NORM_MEAN, std=SEG_NORM_STD, max_pixel_value=1),
             ToTensorV2(),

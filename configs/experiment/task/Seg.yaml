@@ -27,6 +27,14 @@ train:
   layer_decay: 0.65
   val_freq: 5
 
+# Ghi de tu CLI: aug.train='[{name:HorizontalFlip,p:0.5},{name:RandomBrightnessContrast,p:0.5}]'
+# `name` = ten class albumentations, khoa con lai = kwargs. [] = tat aug.
+aug:
+  train:
+    - {name: RandomRotate90, p: 0.5}
+    - {name: HorizontalFlip, p: 0.5}
+    - {name: VerticalFlip, p: 0.5}
+
 print_freq: 100
 save_freq: 20
 tag: debug
