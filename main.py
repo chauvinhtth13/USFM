@@ -15,6 +15,9 @@ import torch
 from omegaconf import DictConfig
 
 torch.set_float32_matmul_precision("high")
+# Input luon co kich thuoc co dinh (img_size vuong) nen autotune cua cudnn
+# chi ton vai iteration dau, sau do lai toc do cho patch_embed + fpn conv.
+torch.backends.cudnn.benchmark = True
 
 
 @hydra.main(

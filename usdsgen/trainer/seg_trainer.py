@@ -215,19 +215,24 @@ class SegTrainer(BaseTrainer):
             iou_meter.update(self.IOU(outputs, labels).item())
             batch_time.update(time.time() - end)
             end = time.time()
-        lr = self.optimizer.param_groups[-1]["lr"]
-        memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
-        etas = batch_time.avg * (num_steps - idx)
-        self.logger.info(
-            f"Train: [{self.epoch}/{self.config.train.epochs}][{idx}/{num_steps}]\t"
-            f"eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t"
-            f"time {batch_time.avg:.4f} ({batch_time.val:.4f})\t"
-            f"loss {loss_meter.avg:.4f} ({loss_meter.val:.4f})\t"
-            f"DICE {dice_meter.avg:.3f} ({dice_meter.val:.3f})\t"
-            f"IOU {iou_meter.avg:.3f} ({iou_meter.val:.3f})\t"
-            f"grad_norm {norm_meter.avg:.4f} ({norm_meter.val:.4f})\t"
-            f"mem {memory_used:.0f}MB"
-        )
+
+            # Truoc day chi log MOT lan sau ca epoch (43 phut o 768px) nen
+            # khong doi chieu duoc toc do giua cac cau hinh, cung khong co ETA.
+            # `print_freq` da nam trong config nhung khong duoc doc o dau ca.
+            if (idx + 1) % self.config.print_freq == 0 or idx + 1 == num_steps:
+                lr = self.optimizer.param_groups[-1]["lr"]
+                memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+                etas = batch_time.avg * (num_steps - idx)
+                self.logger.info(
+                    f"Train: [{self.epoch}/{self.config.train.epochs}][{idx}/{num_steps}]\t"
+                    f"eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t"
+                    f"time {batch_time.avg:.4f} ({batch_time.val:.4f})\t"
+                    f"loss {loss_meter.avg:.4f} ({loss_meter.val:.4f})\t"
+                    f"DICE {dice_meter.avg:.3f} ({dice_meter.val:.3f})\t"
+                    f"IOU {iou_meter.avg:.3f} ({iou_meter.val:.3f})\t"
+                    f"grad_norm {norm_meter.avg:.4f} ({norm_meter.val:.4f})\t"
+                    f"mem {memory_used:.0f}MB"
+                )
         epoch_time = time.time() - start
         self.logger.info(
             f"EPOCH {self.epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}"
